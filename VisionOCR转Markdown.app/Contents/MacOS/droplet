@@ -98,6 +98,16 @@ case "${1:-}" in
         ;;
 esac
 
+# OCR 引擎选择：--engine mineru 或 --engine visionocr
+ocr_engine="mineru"
+case "${1:-}" in
+    --engine)
+        shift
+        ocr_engine="${1:-mineru}"
+        shift
+        ;;
+esac
+
 case "${1:-}" in
     -h|--help|help)
         print_usage
@@ -141,7 +151,7 @@ for file in "$@"; do
     case "$ext" in
         pdf|png|jpg|jpeg|tif|tiff|bmp|gif|heic|webp)
             output="$OUTPUT_DIR/${stem}.md"
-            if [ -x "$MINERU_CLI" ]; then
+            if [ "$ocr_engine" = "mineru" ] && [ -x "$MINERU_CLI" ]; then
                 channel="mineru"
                 mineru_outdir="$OUTPUT_DIR/_mineru_tmp_${stem}"
                 command=( "$MINERU_CLI" -p "$file" -o "$mineru_outdir" )

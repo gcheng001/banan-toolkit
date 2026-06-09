@@ -8,28 +8,45 @@ export MINERU_MODEL_SOURCE=modelscope
 MINERU_VENV="/Users/Apple/MinerU-src/.venv"
 MINERU_PYTHON="$MINERU_VENV/bin/python3"
 MINERU_SRC="/Users/Apple/MinerU-src"
+LOG="/tmp/mineru-webui.log"
 PORT=7860
 
-# 检查端口是否被占用
+# 检查 Python 是否存在
+if [ ! -x "$MINERU_PYTHON" ]; then
+    /usr/bin/osascript -e "display alert \"MinerU 未安装\" message \"找不到 $MINERU_PYTHON\"" 2>/dev/null || true
+    exit 1
+fi
+
+# 检查端口是否被占用，占用则换端口
 if lsof -Pi ":$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
     PORT=$((PORT + RANDOM % 100 + 1))
 fi
 
-/usr/bin/osascript -e "display notification \"正在启动 MinerU 本地版（端口 $PORT）...\" with title \"MinerU 本地版\""
+{
+    echo "=== MinerU 本地版启动 === $(date)"
+    echo "Python: $MINERU_PYTHON"
+    echo "端口: $PORT"
+} > "$LOG"
+
+/usr/bin/osascript -e "display notification \"正在启动（端口 $PORT）...\" with title \"MinerU 本地版\"" 2>/dev/null || true
 
 cd "$MINERU_SRC"
-"$MINERU_PYTHON" -m mineru.cli.gradio_app --port "$PORT" &
+"$MINERU_PYTHON" -m mineru.cli.gradio_app --port "$PORT" >> "$LOG" 2>&1 &
+GRADIO_PID=$!
 
-# 等待服务启动
-for i in $(seq 1 30); do
+# 等待服务启动（最多 60 秒）
+for i in $(seq 1 60); do
     if curl -s -o /dev/null http://127.0.0.1:$PORT 2>/dev/null; then
-        /usr/bin/osascript -e "display notification \"已启动，正在打开浏览器...\" with title \"MinerU 本地版\""
+        /usr/bin/osascript -e "display notification \"已启动！\" with title \"MinerU 本地版\"" 2>/dev/null || true
         open "http://127.0.0.1:$PORT"
-        wait
+        # 等待浏览器打开后保持进程
+        wait $GRADIO_PID
         exit 0
     fi
     sleep 1
 done
 
-/usr/bin/osascript -e "display alert \"启动超时\" message \"MinerU 本地版未能在 30 秒内启动。\"" 2>/dev/null || true
+# 启动超时
+/usr/bin/osascript -e "display alert \"启动超时\" message \"查看日志: $LOG\"" 2>/dev/null || true
+kill $GRADIO_PID 2>/dev/null || true
 exit 1
