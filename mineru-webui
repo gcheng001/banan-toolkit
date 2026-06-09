@@ -1,0 +1,26 @@
+#!/bin/bash
+# MinerU 本地 Web UI — 无页数限制，本地计算
+# 用法: mineru-webui [--port 7860]
+
+set -euo pipefail
+
+export HF_HUB_OFFLINE=1
+export MINERU_MODEL_SOURCE=modelscope
+
+MINERU_VENV="/Users/Apple/MinerU-src/.venv"
+MINERU_PYTHON="$MINERU_VENV/bin/python3"
+MINERU_SRC="/Users/Apple/MinerU-src"
+
+PORT="${1:-7860}"
+if [ "$1" = "--port" ] && [ -n "${2:-}" ]; then
+    PORT="$2"
+fi
+
+echo "🚀 启动 MinerU 本地 Web UI..."
+echo "   端口: $PORT"
+echo "   后端: 本地 pipeline + VLM"
+echo "   限制: 无（本地计算）"
+echo ""
+
+cd "$MINERU_SRC"
+exec "$MINERU_PYTHON" -m mineru.cli.gradio_app --port "$PORT"
