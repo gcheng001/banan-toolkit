@@ -1,0 +1,2 @@
+#!/bin/zsh
+exec "/Applications/办案工具集/VisionOCR转Markdown.app/Contents/MacOS/droplet" --wechat "$@"

@@ -1,0 +1,34 @@
+# 微信录屏取证导出需求访谈上下文
+
+- Task statement: 重新梳理“微信录屏取证导出”App 的易用性与交付需求。
+- Desired outcome: 先通过苏格拉底式一问一答明确问题、目标、边界和验收标准，再决定是否改造。
+- Stated solution: 用户暂未要求直接实现，只要求先访谈澄清。
+- Probable intent hypothesis: 现有工具虽然能把录屏抽帧并导出 PDF，但用户觉得日常取证流程不够顺手，可能存在输出质量、重复页、参数复杂、交付物可用性或操作入口问题。
+- Known facts/evidence:
+  - 本目录包含 `VisionOCR转Markdown.app`。
+  - 本目录包含 `微信录屏取证导出/App/微信录屏取证导出.app` 与 `微信录屏取证导出/App/微信录屏取证导出-可调参数.app`。
+  - 使用说明显示现有流程是视频 -> 截图 -> PDF，默认输出到 `/Users/Apple/Desktop/wechat-evidence-output/`。
+  - 现有脚本路径记录为 `/Users/Apple/Codex/wechat-evidence/wechat_evidence.py`。
+  - 参考 App `/Applications/办案工具集/VisionOCR转Markdown.app` 是 shell droplet：双击启动 `~/.local/bin/vision-ocr-gui-native.py` 的 PyObjC 图形窗口，拖拽文件时直接分流处理，统一输出到 `~/Desktop/VisionOCR_Output`。
+- Constraints:
+  - 本轮只做需求访谈，不修改 App。
+  - 采用一问一答，每轮只问一个最高杠杆问题。
+  - 用户可见输出使用中文。
+- Unknowns/open questions:
+  - “不好用”的首要痛点已初步明确：导出质量不好，页数太多，虚影太多；虚影指画面正在转化/滚动时被截入 PDF。
+  - 重复容忍度已初步明确：相邻页可以有部分重复，但不能重复太多，避免 PDF 页数过多。
+  - 页数验收不能按固定时长设定；应取决于聊天内容多少和屏幕滚动速度。滚动快时同一分钟可接受更多页，滚动慢时应明显更少。
+  - 漏截/多截取舍已明确：用户宁愿多截一些，也不能漏掉可能有用的聊天内容。
+  - 最终交付物用途已明确：先作为律师内部筛选初稿，再人工删减整理；不是一键直接提交法院或发给当事人的最终证据包。
+  - 保全目标已明确：尽量保留全部聊天记录，但不能让相邻两页大量重复，否则会增加人工删减负担。
+  - 模式结构已初步明确：新版 App 可以做两个选项，快速导出初稿与 OCR 增强导出并列呈现。
+  - 联网边界已明确：可以接受联网，但默认本地优先，主要是为了节省 token 并控制不必要的外部调用。
+  - 界面方向已明确：新版应做成一个主窗口，而不是延续旧版拖拽到 App 图标自动导出的交互。实施前先画窗口图片，根据图片讨论设计。
+  - 哪些能力必须自动化，哪些可以人工复核。
+  - 不应做什么，避免把工具做重。
+- Decision-boundary unknowns:
+  - 后续是否允许重做入口、输出结构、参数默认值或 PDF 版式。
+  - 是否允许引入 OCR、聊天结构识别、脱敏、批注、目录索引等新功能。用户对 OCR 持开放态度，但担心耗时过长；云端/联网能力可作为可选增强，不应作为默认路径。
+- Likely codebase touchpoints:
+  - `/Applications/办案工具集/微信录屏取证导出`
+  - `/Users/Apple/Codex/wechat-evidence/wechat_evidence.py`
