@@ -3,6 +3,7 @@
 
 import os
 import re
+import hashlib
 import shutil
 import subprocess
 import sys
@@ -741,7 +742,7 @@ class Controller(NSObject):
         for item in self.files[:200]:
             name = Path(item["path"]).name
             rows.append(f"{name}\t排队中\t0%\t--:--")
-            wechat_rows.append(f"{name}\t已导入\t{self._wechat_stride_label()}\t点击导出生成新版")
+            wechat_rows.append(f"{name}\t已导入\t{self._wechat_stride_label()} / 缓存{self._wechat_cache_interval():g}秒\t点击导出生成新版")
         if self.wechat_last_rows and len(self.wechat_last_rows) > 1:
             wechat_rows.extend(["", "已生成版本\t状态\t选帧方式\t输出"])
             wechat_rows.extend(self.wechat_last_rows[1:])
@@ -1389,33 +1390,32 @@ horizontal_rule:
         self.wechat_mode_control.setAction_("wechatModeChanged:")
         left.addSubview_(self.wechat_mode_control)
 
-        left.addSubview_(_label("抽帧策略", 18, left.bounds().size.height - 146, 120, 18, size=12, color=C_DIM))
-        self.wechat_capture_level = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 178, 284, 28), False)
-        for opt in ["更少页", "平衡", "少漏内容"]:
-            self.wechat_capture_level.addItemWithTitle_(opt)
-        self.wechat_capture_level.selectItemAtIndex_(2)
-        left.addSubview_(self.wechat_capture_level)
+        left.addSubview_(_label("原始缓存", 18, left.bounds().size.height - 146, 120, 18, size=12, color=C_DIM))
+        self.wechat_cache_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 178, 284, 28), False)
+        for opt in ["0.5 秒/张（默认）", "0.25 秒/张（更细）", "1 秒/张（省空间）"]:
+            self.wechat_cache_popup.addItemWithTitle_(opt)
+        self.wechat_cache_popup.selectItemAtIndex_(0)
+        self.wechat_cache_popup.setTarget_(self)
+        self.wechat_cache_popup.setAction_("wechatStrideChanged:")
+        left.addSubview_(self.wechat_cache_popup)
 
-        left.addSubview_(_label("选帧方式", 18, left.bounds().size.height - 220, 120, 18, size=12, color=C_DIM))
+        left.addSubview_(_label("保留间隔", 18, left.bounds().size.height - 220, 120, 18, size=12, color=C_DIM))
         self.wechat_stride_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 252, 284, 28), False)
         for opt in [
             "自动判断滚动速度",
-            "每 3 帧留 1 张",
-            "每 4 帧留 1 张",
-            "每 5 帧留 1 张",
-            "每 6 帧留 1 张",
-            "每 7 帧留 1 张",
-            "每 8 帧留 1 张",
-            "每 9 帧留 1 张",
-            "每 10 帧留 1 张",
-            "每 11 帧留 1 张",
-            "每 12 帧留 1 张",
-            "每 14 帧留 1 张",
-            "每 16 帧留 1 张",
-            "每 18 帧留 1 张",
-            "每 20 帧留 1 张",
-            "每 24 帧留 1 张",
-            "每 30 帧留 1 张",
+            "每 0.5 秒留 1 张",
+            "每 1 秒留 1 张",
+            "每 1.5 秒留 1 张",
+            "每 2 秒留 1 张",
+            "每 2.5 秒留 1 张",
+            "每 3 秒留 1 张",
+            "每 3.5 秒留 1 张",
+            "每 4 秒留 1 张",
+            "每 4.5 秒留 1 张",
+            "每 5 秒留 1 张",
+            "每 6 秒留 1 张",
+            "每 8 秒留 1 张",
+            "每 10 秒留 1 张",
             "智能去重（旧逻辑）",
         ]:
             self.wechat_stride_popup.addItemWithTitle_(opt)
@@ -1431,7 +1431,7 @@ horizontal_rule:
         left.addSubview_(self.wechat_quality)
 
         left.addSubview_(_label("选项", 18, left.bounds().size.height - 368, 120, 18, size=12, color=C_DIM))
-        self.wechat_keep_raw = _checkbox("保留原始帧", 18, left.bounds().size.height - 396, 130, 22, True)
+        self.wechat_keep_raw = _checkbox("保留原始缓存", 18, left.bounds().size.height - 396, 130, 22, True)
         self.wechat_context_overlap = _checkbox("相邻页少量重复", 160, left.bounds().size.height - 396, 142, 22, True)
         self.wechat_local_ocr = _checkbox("本地OCR优先", 18, left.bounds().size.height - 426, 130, 22, True)
         self.wechat_candidate_ocr = _checkbox("候选页OCR", 160, left.bounds().size.height - 426, 130, 22, False)
@@ -1500,8 +1500,9 @@ horizontal_rule:
         elif title == "智能去重（旧逻辑）":
             self.selected_wechat_stride = "legacy"
         else:
-            match = re.search(r"每\s*(\d+)\s*帧", title)
-            self.selected_wechat_stride = match.group(1) if match else "auto"
+            match = re.search(r"每\s*([0-9.]+)\s*秒", title)
+            if match:
+                self.selected_wechat_stride = match.group(1).rstrip("0").rstrip(".")
         self._refresh_files()
 
     @objc.python_method
@@ -1510,7 +1511,18 @@ horizontal_rule:
             return "自动判断滚动速度"
         if self.selected_wechat_stride == "legacy":
             return "智能去重"
-        return f"每{self.selected_wechat_stride}帧留1张"
+        return f"每{self.selected_wechat_stride}秒留1张"
+
+    @objc.python_method
+    def _wechat_cache_interval(self):
+        title = str(self.wechat_cache_popup.titleOfSelectedItem()) if hasattr(self, "wechat_cache_popup") else ""
+        match = re.search(r"([0-9.]+)\s*秒/张", title)
+        return float(match.group(1)) if match else 0.5
+
+    @objc.python_method
+    def _wechat_seconds_tag(self, value):
+        text = f"{float(value):g}".replace(".", "p")
+        return f"{text}s"
 
     @objc.python_method
     def _wechat_version_slug(self):
@@ -1519,9 +1531,17 @@ horizontal_rule:
         elif self.selected_wechat_stride == "legacy":
             stride = "legacy"
         else:
-            stride = f"stride{self.selected_wechat_stride}"
+            stride = f"time{self._wechat_seconds_tag(self.selected_wechat_stride)}"
+        cache = f"cache{self._wechat_seconds_tag(self._wechat_cache_interval())}"
         mode = "ocr" if self.wechat_mode == "ocr" else "quick"
-        return f"{mode}_{stride}"
+        return f"{mode}_{stride}_{cache}"
+
+    @objc.python_method
+    def _wechat_video_cache_dir(self, video_path, cache_interval):
+        stat = video_path.stat()
+        digest = hashlib.sha1(f"{video_path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8")).hexdigest()[:12]
+        base_name = re.sub(r"[^0-9A-Za-z._-]+", "_", video_path.stem).strip("._-") or "recording"
+        return self.wechat_output_dir / "_原始抽帧缓存" / f"{base_name}_{digest}" / f"cache_{self._wechat_seconds_tag(cache_interval)}"
 
     @objc.python_method
     def _wechat_next_version_dir(self, video_path):
@@ -1558,6 +1578,7 @@ horizontal_rule:
                         f"源视频：{source_path}",
                         f"版本：{version_label}",
                         f"选帧方式：{stride_label}",
+                        f"原始缓存：每 {self._wechat_cache_interval():g} 秒 1 张",
                         f"处理模式：{'OCR增强' if self.wechat_mode == 'ocr' else '快速初稿'}",
                         f"生成时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
                         f"PDF：{named_pdf.name}",
@@ -1578,8 +1599,9 @@ horizontal_rule:
 
     @objc.python_method
     def _wechat_profile_args(self):
-        capture_level = self._control_index(self.wechat_capture_level)
+        capture_level = 2
         selected_quality = self._control_index(self.wechat_quality)
+        cache_interval = self._wechat_cache_interval()
 
         image_ext = "png"
         max_width = None
@@ -1627,6 +1649,7 @@ horizontal_rule:
             "--image-ext", image_ext,
             "--filter", "auto",
             "--burst-fps", burst_fps,
+            "--raw-cache-interval", f"{cache_interval:g}",
             "--dedupe-distance", dedupe_distance,
             "--dedupe-window", dedupe_window,
             "--min-visual-delta", min_visual_delta,
@@ -1636,8 +1659,12 @@ horizontal_rule:
             "--pdf-jpeg-quality", pdf_quality,
         ]
         if self.selected_wechat_stride != "legacy":
-            args += ["--stride-frames", self.selected_wechat_stride]
-            label += " / 自动步长" if self.selected_wechat_stride == "auto" else f" / 每{self.selected_wechat_stride}帧留1张"
+            if self.selected_wechat_stride == "auto":
+                args += ["--stride-frames", "auto"]
+                label += f" / 自动步长 / 缓存{cache_interval:g}秒"
+            else:
+                args += ["--stride-seconds", self.selected_wechat_stride]
+                label += f" / 每{self.selected_wechat_stride}秒留1张 / 缓存{cache_interval:g}秒"
         if max_width:
             args += ["--max-width", max_width]
         if not bool(self.wechat_keep_raw.state()):
@@ -1682,10 +1709,15 @@ horizontal_rule:
             path = Path(item["path"])
             export_dir, version_label = self._wechat_next_version_dir(path)
             stride_label = self._wechat_stride_label()
+            cache_interval = self._wechat_cache_interval()
+            display_stride_label = f"{stride_label} / 缓存{cache_interval:g}秒"
+            raw_cache_dir = self._wechat_video_cache_dir(path, cache_interval)
             self.status_label.setStringValue_(f"正在导出：{path.name}（{profile_label} / {version_label}）")
             cmd = [
                 sys.executable, str(WECHAT_CLI), "interval-pdf", str(path),
-                "--out-dir", str(export_dir), *profile_args,
+                "--out-dir", str(export_dir),
+                "--raw-cache-dir", str(raw_cache_dir),
+                *profile_args,
             ]
             proc = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             while proc.poll() is None:
@@ -1712,15 +1744,15 @@ horizontal_rule:
                     ok_count += 1
                     generated_dirs.append(export_dir)
                     named_pdf = self._wechat_finalize_version_files(export_dir, pdfs, version_label, stride_label, path)
-                    rows.append(f"{path.name}\t完成\t{stride_label}\t{version_label}  {named_pdf or pdfs[0]}")
+                    rows.append(f"{path.name}\t完成\t{display_stride_label}\t{version_label}  {named_pdf or pdfs[0]}")
                 else:
                     msg = validate.stderr.strip() or validate.stdout.strip() or "导出校验失败"
                     failures.append(f"{path.name}: {msg}")
-                    rows.append(f"{path.name}\t失败\t{stride_label}\t{msg}")
+                    rows.append(f"{path.name}\t失败\t{display_stride_label}\t{msg}")
             else:
                 msg = proc.stderr.read().strip() if proc.stderr else "导出失败"
                 failures.append(f"{path.name}: {msg[:80]}")
-                rows.append(f"{path.name}\t失败\t{stride_label}\t{msg[:80]}")
+                rows.append(f"{path.name}\t失败\t{display_stride_label}\t{msg[:80]}")
             self.wechat_last_rows = rows[:]
             self.wechat_task_text.setString_("\n".join(rows))
             done = idx / total

@@ -91,6 +91,13 @@ def _raw_frames_dir(out_dir: Path) -> Path:
     return _review_dir(out_dir) / "原始抽帧"
 
 
+def _list_raw_frames(raw_dir: Path, image_ext: str) -> List[Path]:
+    frames = sorted(raw_dir.glob(f"raw_*.{image_ext}"))
+    if not frames:
+        frames = sorted([p for p in raw_dir.glob("raw_*.*") if p.suffix.lower() in {".png", ".jpg", ".jpeg"}])
+    return frames
+
+
 def _pdf_path(out_dir: Path, label: str = "") -> Path:
     suffix = f"_{label}" if label else ""
     return out_dir / f"录屏取证初稿{suffix}.pdf"
@@ -1066,6 +1073,19 @@ def _parse_stride_frames(value: str) -> int | str | None:
     return stride
 
 
+def _parse_stride_seconds(value: str) -> float | None:
+    value = (value or "").strip().lower()
+    if not value:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        _die("--stride-seconds must be a positive number")
+    if seconds <= 0:
+        _die("--stride-seconds must be a positive number")
+    return seconds
+
+
 def _auto_stride_frames(raw_frames: List[Path]) -> int:
     if len(raw_frames) < 3:
         return 10
@@ -1082,6 +1102,12 @@ def _auto_stride_frames(raw_frames: List[Path]) -> int:
     if p75 >= 10:
         return 15
     return 20
+
+
+def _stride_frames_from_seconds(stride_seconds: float, raw_interval_sec: float) -> int:
+    if raw_interval_sec <= 0:
+        _die("--raw-cache-interval must be > 0")
+    return max(1, int(round(stride_seconds / raw_interval_sec)))
 
 
 def _select_by_stride_frames(
@@ -1168,6 +1194,11 @@ def cmd_interval_pdf(args: argparse.Namespace) -> None:
 
     variants: List[float] = list(args.variants or [])
     stride_frames = _parse_stride_frames(getattr(args, "stride_frames", ""))
+    stride_seconds = _parse_stride_seconds(getattr(args, "stride_seconds", ""))
+    raw_cache_interval = float(getattr(args, "raw_cache_interval", 0.0) or 0.0)
+    raw_cache_dir_arg = (getattr(args, "raw_cache_dir", "") or "").strip()
+    if stride_frames is not None and stride_seconds is not None:
+        _die("--stride-frames and --stride-seconds cannot be used together.")
     if variants:
         if any(v <= 0 for v in variants):
             _die("--variants values must be > 0")
@@ -1179,6 +1210,8 @@ def cmd_interval_pdf(args: argparse.Namespace) -> None:
             _die("--pdf cannot be used with --variants (multiple outputs).")
         if stride_frames is not None:
             _die("--stride-frames cannot be used with --variants.")
+        if stride_seconds is not None:
+            _die("--stride-seconds cannot be used with --variants.")
 
     if args.pdf and len(videos) != 1:
         _die("--pdf can only be used with a single input video (otherwise outputs would overwrite).")
@@ -1197,6 +1230,8 @@ def cmd_interval_pdf(args: argparse.Namespace) -> None:
         _die("--filter must be one of: off, auto")
     if args.burst_fps is not None and args.burst_fps < 0:
         _die("--burst-fps must be >= 0")
+    if raw_cache_interval is not None and raw_cache_interval < 0:
+        _die("--raw-cache-interval must be >= 0")
     if args.max_raw_frames is not None and args.max_raw_frames < 0:
         _die("--max-raw-frames must be >= 0")
     if args.dedupe_distance is not None and args.dedupe_distance < 0:
@@ -1257,27 +1292,36 @@ def cmd_interval_pdf(args: argparse.Namespace) -> None:
                 except Exception as e:
                     print(f"Warning: failed to delete frames dir: {frames_dir}: {e}", file=sys.stderr)
         else:
-            burst_fps = float(args.burst_fps) if args.burst_fps and args.burst_fps > 0 else 8.0
+            if raw_cache_interval > 0:
+                burst_fps = 1.0 / raw_cache_interval
+            else:
+                burst_fps = float(args.burst_fps) if args.burst_fps and args.burst_fps > 0 else 8.0
+                raw_cache_interval = 1.0 / burst_fps
             review_dir = _review_dir(out_dir)
             review_dir.mkdir(parents=True, exist_ok=True)
-            raw_dir = _raw_frames_dir(out_dir)
+            raw_dir = Path(raw_cache_dir_arg).expanduser().resolve() if raw_cache_dir_arg else _raw_frames_dir(out_dir)
             raw_index_path = review_dir / "原始抽帧索引.jsonl"
             selected_index_path = _selected_index_path(out_dir)
 
-            raw_frames = _extract_frames_burst(
-                video_path=video_path,
-                frames_dir=raw_dir,
-                burst_fps=burst_fps,
-                image_ext=args.image_ext,
-                start_sec=args.start,
-                duration_sec=args.duration,
-                max_width=args.max_width or 0,
-                max_raw_frames=args.max_raw_frames,
-            )
+            raw_frames = _list_raw_frames(raw_dir, args.image_ext)
+            if raw_frames:
+                print(f"reuse_raw_cache={raw_dir}", file=sys.stderr)
+            else:
+                raw_frames = _extract_frames_burst(
+                    video_path=video_path,
+                    frames_dir=raw_dir,
+                    burst_fps=burst_fps,
+                    image_ext=args.image_ext,
+                    start_sec=args.start,
+                    duration_sec=args.duration,
+                    max_width=args.max_width or 0,
+                    max_raw_frames=args.max_raw_frames,
+                )
+                print(f"created_raw_cache={raw_dir}", file=sys.stderr)
             _write_index_jsonl(
                 raw_frames,
                 raw_index_path,
-                interval_sec=1.0 / burst_fps,
+                interval_sec=raw_cache_interval,
                 start_sec=args.start,
                 include_sha256=False,
             )
@@ -1360,7 +1404,19 @@ def cmd_interval_pdf(args: argparse.Namespace) -> None:
                     label = _variant_label(variant_interval)
                     exported_v.append(_export_variant(variant_interval, out_dir, label))
             else:
-                if stride_frames is not None:
+                if stride_seconds is not None:
+                    actual_stride = _stride_frames_from_seconds(stride_seconds, raw_cache_interval)
+                    selected_deduped, selection_decisions, actual_stride = _select_by_stride_frames(
+                        raw_frames=raw_frames,
+                        burst_fps=burst_fps,
+                        start_sec=args.start,
+                        stride_frames=actual_stride,
+                        preserve_head_sec=float(args.preserve_head_sec or 0.0),
+                    )
+                    print(f"stride_seconds={stride_seconds}", file=sys.stderr)
+                    print(f"raw_cache_interval={raw_cache_interval}", file=sys.stderr)
+                    print(f"stride_frames={actual_stride}", file=sys.stderr)
+                elif stride_frames is not None:
                     selected_deduped, selection_decisions, actual_stride = _select_by_stride_frames(
                         raw_frames=raw_frames,
                         burst_fps=burst_fps,
@@ -1471,6 +1527,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pixel-delta", type=float, default=None, help="When --filter auto: cropped thumbnail mean-difference threshold (default: 0.02)")
     p.add_argument("--stable-motion-distance", type=int, default=None, help="When --filter auto: prefer frames whose neighbor dHash distance is at most this value (default: 18)")
     p.add_argument("--stride-frames", default="", help="When --filter auto: keep every N raw frames, or auto to infer N from scroll speed")
+    p.add_argument("--stride-seconds", default="", help="When --filter auto: keep one frame every N seconds from raw cache")
+    p.add_argument("--raw-cache-dir", default="", help="When --filter auto: shared raw frame cache dir; reuse if it already has raw frames")
+    p.add_argument("--raw-cache-interval", type=float, default=0.0, help="Seconds between frames in the shared raw cache")
     p.add_argument("--min-sharpness", type=float, default=None, help="When --filter auto: minimum sharpness score (optional)")
     p.add_argument("--drop-blurry", action="store_true", help="When --filter auto: drop buckets below --min-sharpness")
     p.add_argument("--keep-raw", action="store_true", default=True, help="When --filter auto: keep 原始抽帧/ (default)")
