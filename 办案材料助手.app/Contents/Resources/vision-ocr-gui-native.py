@@ -3,6 +3,7 @@
 
 import os
 import re
+import json
 import hashlib
 import shutil
 import subprocess
@@ -98,6 +99,9 @@ OCR_EXTS = {"pdf"} | IMAGE_EXTS | AUDIO_EXTS | VIDEO_EXTS
 DOCX_EXTS = {"md", "txt", "markdown"}
 MARKDOWN_EXTS = {"docx", "doc", "xlsx", "xls", "xlsm", "csv", "tsv", "ods", "pptx", "ppt", "html", "htm", "epub", "json", "xml", "zip"}
 TO_MARKDOWN_EXTS = OCR_EXTS | MARKDOWN_EXTS
+EVIDENCE_TEXT_EXTS = {"md", "markdown", "txt"}
+EVIDENCE_INDEX_EXTS = {"jsonl", "json"}
+EVIDENCE_SKIP_DIRS = {"证据整理", "_原始抽帧缓存", "archive", "__pycache__"}
 
 
 def _c(r, g, b, a=1.0):
@@ -321,6 +325,7 @@ class Controller(NSObject):
         self.wechat_cloud_base_url = WECHAT_DEFAULT_CLOUD_BASE_URL
         self.wechat_cloud_model = WECHAT_DEFAULT_CLOUD_MODEL
         self.wechat_reuse_raw_only = False
+        self.last_evidence_dir = None
         self.current_accent = C_TEXT_STRONG
         self.current_soft_accent = C_PANEL_BG
         self.output_dir = Path.home() / "Desktop" / "VisionOCR_Output"
@@ -492,7 +497,12 @@ class Controller(NSObject):
         self.btn_start_left_ocr = _btn("▶  转为 Markdown", 18, 14, 284, 34, self, "startProcessing:")
         _resize(self.btn_start_left_ocr, PIN_BOTTOM)
         left.addSubview_(self.btn_start_left_ocr)
-        _pin_panel_controls_to_top(left, (self.btn_start_left_ocr,))
+        self.btn_evidence_left_ocr = _btn("证据整理", 18, 54, 284, 30, self, "organizeEvidence:")
+        _resize(self.btn_evidence_left_ocr, PIN_BOTTOM)
+        left.addSubview_(self.btn_evidence_left_ocr)
+        _set_view_style(self.btn_evidence_left_ocr, C_WHITE, C_BORDER, 8)
+        self.btn_evidence_left_ocr.setContentTintColor_(C_TEXT_STRONG)
+        _pin_panel_controls_to_top(left, (self.btn_start_left_ocr, self.btn_evidence_left_ocr))
 
         right = NSView.alloc().initWithFrame_(NSMakeRect(356, 20, self.ocr_page.bounds().size.width - 376, body_h - 40))
         _resize(right, FILL_WIDTH | FILL_HEIGHT)
@@ -1015,6 +1025,347 @@ class Controller(NSObject):
         self.status_label.setStringValue_("已清空")
 
     @IBAction
+    def organizeEvidence_(self, _sender):
+        if self.is_running:
+            return
+        source_dir = self._current_evidence_source_dir()
+        if not source_dir or not source_dir.exists():
+            self._alert("没有可整理的目录", "请先完成材料转 Markdown 或录屏取证，再点击“证据整理”。")
+            return
+        self.is_running = True
+        self.is_paused = False
+        self.should_stop = False
+        self._timer_stop = False
+        self._start_time = time.time()
+        self.progress_bar.setValue_(0.0)
+        self.pct_label.setStringValue_("0%")
+        self.status_label.setStringValue_("正在扫描当前输出文件夹...")
+        self._set_running_ui(True)
+        threading.Thread(target=self._timer_loop, daemon=True).start()
+        threading.Thread(target=self._evidence_thread, args=(source_dir,), daemon=True).start()
+
+    @objc.python_method
+    def _path_from_output_field(self, field_name, default_path):
+        field = getattr(self, field_name, None)
+        value = field.stringValue().strip() if field else ""
+        if value:
+            return Path(value.replace("~", str(Path.home()), 1)).expanduser()
+        return Path(default_path).expanduser()
+
+    @objc.python_method
+    def _current_evidence_source_dir(self):
+        if self.mode == "wechat":
+            base = self._path_from_output_field("out_path_wechat", self.wechat_output_dir)
+            return self._latest_wechat_export_dir(base)
+        return self._path_from_output_field("out_path_ocr", self.output_dir)
+
+    @objc.python_method
+    def _dir_has_evidence_files(self, folder):
+        for child in Path(folder).iterdir() if Path(folder).exists() else []:
+            if child.name in EVIDENCE_SKIP_DIRS:
+                continue
+            if child.is_file() and self._is_evidence_file(child):
+                return True
+        return False
+
+    @objc.python_method
+    def _latest_wechat_export_dir(self, base):
+        base = Path(base).expanduser()
+        if not base.exists():
+            return base
+        if self._dir_has_evidence_files(base):
+            return base
+        candidates = []
+        for child in base.iterdir():
+            if not child.is_dir() or child.name in EVIDENCE_SKIP_DIRS:
+                continue
+            files = [p for p in child.rglob("*") if p.is_file() and self._is_evidence_file(p) and not self._path_is_skipped(p)]
+            if files:
+                newest = max(p.stat().st_mtime for p in files)
+                candidates.append((newest, child))
+        if not candidates:
+            return base
+        return sorted(candidates, key=lambda item: item[0], reverse=True)[0][1]
+
+    @objc.python_method
+    def _is_evidence_file(self, path):
+        suffix = Path(path).suffix.lower().lstrip(".")
+        return suffix in EVIDENCE_TEXT_EXTS or suffix == "pdf" or suffix in EVIDENCE_INDEX_EXTS
+
+    @objc.python_method
+    def _path_is_skipped(self, path):
+        parts = set(Path(path).parts)
+        return bool(parts & EVIDENCE_SKIP_DIRS)
+
+    @objc.python_method
+    def _file_sha256(self, path):
+        h = hashlib.sha256()
+        with Path(path).open("rb") as fp:
+            for chunk in iter(lambda: fp.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    @objc.python_method
+    def _material_kind(self, path):
+        name = Path(path).name
+        suffix = Path(path).suffix.lower().lstrip(".")
+        if suffix == "pdf":
+            return "取证PDF" if "录屏取证" in name else "PDF"
+        if suffix in {"jsonl", "json"}:
+            return "OCR索引" if "OCR" in name or "索引" in name else "结构化索引"
+        if "聊天记录分析报告" in name:
+            return "聊天分析报告"
+        if "OCR文字索引" in name:
+            return "OCR Markdown"
+        if "逐字稿" in name:
+            return "音视频转写稿"
+        return "Markdown文本" if suffix in EVIDENCE_TEXT_EXTS else "材料"
+
+    @objc.python_method
+    def _material_record(self, path, source_dir):
+        path = Path(path)
+        stat = path.stat()
+        return {
+            "material_id": f"mat-{hashlib.sha1(str(path.resolve()).encode('utf-8')).hexdigest()[:10]}",
+            "title": path.stem,
+            "kind": self._material_kind(path),
+            "path": str(path),
+            "relative_path": str(path.relative_to(source_dir)) if source_dir in path.parents or path == source_dir else path.name,
+            "suffix": path.suffix.lower(),
+            "size_bytes": stat.st_size,
+            "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
+            "sha256": self._file_sha256(path),
+            "pending_review": True,
+        }
+
+    @objc.python_method
+    def _scan_evidence_materials(self, source_dir):
+        source_dir = Path(source_dir)
+        files = []
+        for path in sorted(source_dir.rglob("*")):
+            if not path.is_file() or self._path_is_skipped(path):
+                continue
+            if self._is_evidence_file(path):
+                files.append(path)
+        return [self._material_record(path, source_dir) for path in files]
+
+    @objc.python_method
+    def _read_text_material(self, path, limit=8000):
+        try:
+            return Path(path).read_text(encoding="utf-8", errors="ignore")[:limit]
+        except Exception:
+            return ""
+
+    @objc.python_method
+    def _ensure_pdf_markdown_for_evidence(self, source_dir, evidence_dir, materials):
+        has_text = any(item["suffix"].lstrip(".") in EVIDENCE_TEXT_EXTS for item in materials)
+        pdfs = [Path(item["path"]) for item in materials if item["suffix"] == ".pdf"]
+        if has_text or not pdfs:
+            return materials, ""
+        pdf = sorted(pdfs, key=lambda p: p.stat().st_mtime, reverse=True)[0]
+        auto_dir = evidence_dir / "自动补转MD"
+        auto_dir.mkdir(parents=True, exist_ok=True)
+        out = auto_dir / f"{pdf.stem}.md"
+        note = ""
+        if not out.exists():
+            self.status_label.setStringValue_(f"正在将取证PDF补转 Markdown：{pdf.name}")
+            proc = subprocess.run([CLI, str(pdf), "--output", str(out)], text=True, capture_output=True)
+            if proc.returncode != 0 or not out.exists():
+                note = (proc.stderr or proc.stdout or "PDF 补转 Markdown 失败").strip()[:500]
+                return materials, note
+        auto_record = self._material_record(out, source_dir)
+        auto_record["kind"] = "自动补转Markdown"
+        auto_record["source_pdf"] = str(pdf)
+        materials.append(auto_record)
+        return materials, note
+
+    @objc.python_method
+    def _extract_timeline_events(self, materials):
+        events = []
+        date_pattern = re.compile(r"(\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}日?|\d{1,2}月\d{1,2}日|\d{1,2}:\d{2}(?::\d{2})?)")
+        for item in materials:
+            path = Path(item["path"])
+            suffix = item["suffix"].lstrip(".")
+            if suffix == "jsonl":
+                try:
+                    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                        if not line.strip():
+                            continue
+                        record = json.loads(line)
+                        chat_time = str(record.get("chat_time") or "").strip()
+                        screen_time = str(record.get("timestamp_hms") or "").strip()
+                        content = str(record.get("chat_content") or record.get("text") or "").strip()
+                        if chat_time or screen_time or content:
+                            events.append({
+                                "time": chat_time or screen_time or "需人工确认",
+                                "source": item["title"],
+                                "excerpt": re.sub(r"\s+", " ", content)[:160] or "OCR记录，需人工核实",
+                            })
+                except Exception:
+                    pass
+                continue
+            if suffix not in EVIDENCE_TEXT_EXTS:
+                continue
+            text = self._read_text_material(path, limit=30000)
+            for line in text.splitlines():
+                clean = line.strip().strip("| ")
+                if not clean:
+                    continue
+                match = date_pattern.search(clean)
+                if match or "录屏时间" in clean or "聊天时间" in clean:
+                    events.append({
+                        "time": match.group(1) if match else "需人工确认",
+                        "source": item["title"],
+                        "excerpt": clean[:180],
+                    })
+                if len(events) >= 300:
+                    break
+        return events[:300]
+
+    @objc.python_method
+    def _write_evidence_outputs(self, source_dir, evidence_dir, materials, timeline_events, conversion_note):
+        generated_at = time.strftime("%Y-%m-%d %H:%M:%S")
+        summary_path = evidence_dir / "案件材料汇总.md"
+        timeline_path = evidence_dir / "案件时间线.md"
+        manifest_path = evidence_dir / "materials_manifest.json"
+        intake_path = evidence_dir / "case_os_intake_package.json"
+
+        summary_lines = [
+            "# 案件材料汇总",
+            "",
+            "需人工核实。本汇总只基于当前输出文件夹中的文件生成，OCR、语音识别、身份、金额和日期均不得直接作为已确认事实。",
+            "",
+            f"- 生成时间：{generated_at}",
+            f"- 来源目录：`{source_dir}`",
+            f"- 材料数量：{len(materials)}",
+            "",
+            "## 材料清单",
+            "",
+            "| 序号 | 类型 | 文件 | 修改时间 | SHA256 |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+        for idx, item in enumerate(materials, start=1):
+            summary_lines.append(f"| {idx} | {item['kind']} | `{item['relative_path']}` | {item['mtime']} | `{item['sha256'][:12]}` |")
+        if conversion_note:
+            summary_lines.extend(["", "## 自动补转提示", "", f"- {conversion_note}"])
+        summary_lines.extend(["", "## 文本摘录", ""])
+        for item in materials:
+            if item["suffix"].lstrip(".") not in EVIDENCE_TEXT_EXTS:
+                continue
+            text = self._read_text_material(item["path"], limit=3000).strip()
+            summary_lines.extend([
+                f"### {item['title']}",
+                "",
+                f"- 类型：{item['kind']}",
+                f"- 文件：`{item['path']}`",
+                "",
+                "```text",
+                text or "（无可读取文本）",
+                "```",
+                "",
+            ])
+        summary_path.write_text("\n".join(summary_lines).rstrip() + "\n", encoding="utf-8")
+
+        timeline_lines = [
+            "# 案件时间线",
+            "",
+            "需人工核实。以下时间线由 Markdown、OCR 索引和转写文本中可识别的时间线索自动抽取。",
+            "",
+            "| 序号 | 时间线索 | 来源 | 内容摘录 |",
+            "| --- | --- | --- | --- |",
+        ]
+        if timeline_events:
+            for idx, event in enumerate(timeline_events, start=1):
+                excerpt = str(event["excerpt"]).replace("|", "｜")
+                timeline_lines.append(f"| {idx} | {event['time']} | {event['source']} | {excerpt} |")
+        else:
+            timeline_lines.append("| 1 | 需人工补充 | 当前材料 | 未自动识别到稳定时间线索 |")
+        timeline_path.write_text("\n".join(timeline_lines).rstrip() + "\n", encoding="utf-8")
+
+        manifest = {
+            "package_version": "evidence-organizer-v0.1",
+            "generated_at": generated_at,
+            "source_dir": str(source_dir),
+            "evidence_dir": str(evidence_dir),
+            "materials": materials,
+            "outputs": {
+                "summary_md": str(summary_path),
+                "timeline_md": str(timeline_path),
+                "manifest_json": str(manifest_path),
+                "case_os_intake_package_json": str(intake_path),
+            },
+        }
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        intake = {
+            "package_version": "case-os-intake-v0.1",
+            "source_system": "办案材料助手-证据整理",
+            "generated_at": generated_at,
+            "intended_use": "供案件OS Phase A读取的材料输入包；不表示案件OS任一步骤已经完成。",
+            "source_dir": str(source_dir),
+            "materials": materials,
+            "derived_outputs": manifest["outputs"],
+            "upstream_summary": {
+                "step": "证据材料文字化与整理",
+                "conclusion": f"已从当前输出目录登记 {len(materials)} 份材料，并生成材料汇总与时间线初稿。",
+                "key_findings": [
+                    f"自动抽取时间线索 {len(timeline_events)} 条",
+                    "所有 OCR、语音识别和自动抽取内容均需律师人工核实",
+                ],
+                "pending_review": True,
+                "confirmation_status": "pending",
+            },
+            "handoff_notes": {
+                "missing_info": ["材料真实性、完整性、发言人身份、金额和日期均需人工确认"],
+                "risk_alerts": [
+                    "本包不得替代原始录屏、截图、PDF或音视频文件",
+                    "不得把 OCR 或语音转写内容直接写成已确认事实",
+                ],
+                "next_step_hints": ["可交给案件OS Phase A继续做案件理解、归档和证据卡片整理"],
+            },
+        }
+        intake_path.write_text(json.dumps(intake, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return summary_path, timeline_path, manifest_path, intake_path
+
+    @objc.python_method
+    def _evidence_thread(self, source_dir):
+        evidence_dir = Path(source_dir) / "证据整理"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        conversion_note = ""
+        try:
+            self.progress_bar.setValue_(0.15)
+            self.pct_label.setStringValue_("15%")
+            materials = self._scan_evidence_materials(source_dir)
+            self.progress_bar.setValue_(0.35)
+            self.pct_label.setStringValue_("35%")
+            materials, conversion_note = self._ensure_pdf_markdown_for_evidence(source_dir, evidence_dir, materials)
+            if not materials:
+                self.status_label.setStringValue_("未找到可整理的 Markdown、PDF 或 OCR 索引")
+                self._alert("没有可整理的材料", f"当前目录中没有找到 Markdown、PDF 或 OCR 索引：\n{source_dir}")
+                return
+            self.status_label.setStringValue_("正在抽取时间线索...")
+            self.progress_bar.setValue_(0.62)
+            self.pct_label.setStringValue_("62%")
+            timeline_events = self._extract_timeline_events(materials)
+            self.status_label.setStringValue_("正在生成证据整理文件...")
+            self.progress_bar.setValue_(0.82)
+            self.pct_label.setStringValue_("82%")
+            outputs = self._write_evidence_outputs(source_dir, evidence_dir, materials, timeline_events, conversion_note)
+            self.last_evidence_dir = evidence_dir
+            self.status_label.setStringValue_(f"证据整理完成：{len(materials)} 份材料")
+            self.progress_bar.setValue_(1.0)
+            self.pct_label.setStringValue_("100%")
+            subprocess.run(["open", str(evidence_dir)], check=False)
+            self._alert("证据整理完成", "已生成：\n" + "\n".join(path.name for path in outputs))
+        except Exception as exc:
+            self.status_label.setStringValue_("证据整理失败")
+            self._alert("证据整理失败", str(exc))
+        finally:
+            self._timer_stop = True
+            self.is_running = False
+            self._set_running_ui(False)
+
+    @IBAction
     def startProcessing_(self, _sender):
         if self.is_running:
             return
@@ -1065,8 +1416,12 @@ class Controller(NSObject):
         self.btn_start.setEnabled_(not running)
         self.btn_start_left_ocr.setEnabled_(not running)
         self.btn_start_left_docx.setEnabled_(not running)
+        if hasattr(self, "btn_evidence_left_ocr"):
+            self.btn_evidence_left_ocr.setEnabled_(not running)
         if hasattr(self, "btn_start_left_wechat"):
             self.btn_start_left_wechat.setEnabled_(not running)
+        if hasattr(self, "btn_evidence_left_wechat"):
+            self.btn_evidence_left_wechat.setEnabled_(not running)
         if hasattr(self, "btn_rerun_left_wechat"):
             self.btn_rerun_left_wechat.setEnabled_(not running)
         self.btn_pause.setEnabled_(running)
@@ -1462,31 +1817,38 @@ horizontal_rule:
         self.wechat_local_ocr = _checkbox("本地OCR优先", 18, left.bounds().size.height - 380, 130, 22, True)
         self.wechat_candidate_ocr = _checkbox("候选页OCR", 160, left.bounds().size.height - 380, 130, 22, False)
         self.wechat_cloud_ocr = _checkbox("手动云端整理", 18, left.bounds().size.height - 408, 140, 22, False)
+        self.wechat_preserve_head = _checkbox("开头详情页加密", 160, left.bounds().size.height - 408, 142, 22, False)
         left.addSubview_(self.wechat_keep_raw)
         left.addSubview_(self.wechat_context_overlap)
         left.addSubview_(self.wechat_local_ocr)
         left.addSubview_(self.wechat_candidate_ocr)
         left.addSubview_(self.wechat_cloud_ocr)
-        left.addSubview_(_btn("云端设置", 176, left.bounds().size.height - 408, 126, 26, self, "configureWeChatCloud:"))
+        left.addSubview_(self.wechat_preserve_head)
+        left.addSubview_(_btn("云端设置", 176, left.bounds().size.height - 436, 126, 26, self, "configureWeChatCloud:"))
 
-        left.addSubview_(_label("输出目录", 18, left.bounds().size.height - 436, 100, 18, size=12, color=C_DIM))
-        self.out_path_wechat = _input_field(18, left.bounds().size.height - 464, 252, 28)
+        left.addSubview_(_label("输出目录", 18, left.bounds().size.height - 470, 100, 18, size=12, color=C_DIM))
+        self.out_path_wechat = _input_field(18, left.bounds().size.height - 498, 252, 28)
         self.out_path_wechat.setStringValue_(str(self.wechat_output_dir).replace(str(Path.home()), "~"))
         left.addSubview_(self.out_path_wechat)
-        self.btn_out_wechat = _btn("📁", 274, left.bounds().size.height - 464, 28, 28, self, "pickOutputDir:")
+        self.btn_out_wechat = _btn("📁", 274, left.bounds().size.height - 498, 28, 28, self, "pickOutputDir:")
         left.addSubview_(self.btn_out_wechat)
 
-        self.btn_start_left_wechat = _btn("导出取证材料", 18, 52, 284, 30, self, "startProcessing:")
+        self.btn_start_left_wechat = _btn("导出取证材料", 18, 88, 284, 30, self, "startProcessing:")
         _resize(self.btn_start_left_wechat, PIN_BOTTOM)
         left.addSubview_(self.btn_start_left_wechat)
         _set_view_style(self.btn_start_left_wechat, C_PANEL_BG, C_BORDER, 8)
         self.btn_start_left_wechat.setContentTintColor_(C_TEXT_STRONG)
+        self.btn_evidence_left_wechat = _btn("证据整理", 18, 52, 284, 30, self, "organizeEvidence:")
+        _resize(self.btn_evidence_left_wechat, PIN_BOTTOM)
+        left.addSubview_(self.btn_evidence_left_wechat)
+        _set_view_style(self.btn_evidence_left_wechat, C_WHITE, C_BORDER, 8)
+        self.btn_evidence_left_wechat.setContentTintColor_(C_TEXT_STRONG)
         self.btn_rerun_left_wechat = _btn("重新导出（复用截图）", 18, 14, 284, 30, self, "rerunWeChatExport:")
         _resize(self.btn_rerun_left_wechat, PIN_BOTTOM)
         left.addSubview_(self.btn_rerun_left_wechat)
         _set_view_style(self.btn_rerun_left_wechat, C_WHITE, C_BORDER, 8)
         self.btn_rerun_left_wechat.setContentTintColor_(C_TEXT_STRONG)
-        _pin_panel_controls_to_top(left, (self.btn_start_left_wechat, self.btn_rerun_left_wechat))
+        _pin_panel_controls_to_top(left, (self.btn_start_left_wechat, self.btn_evidence_left_wechat, self.btn_rerun_left_wechat))
 
         right = NSView.alloc().initWithFrame_(NSMakeRect(356, 20, self.wechat_page.bounds().size.width - 376, body_h - 40))
         _resize(right, FILL_WIDTH | FILL_HEIGHT)
@@ -1612,6 +1974,7 @@ horizontal_rule:
                         f"版本：{version_label}",
                         f"选帧方式：{stride_label}",
                         f"原始缓存：每 {self._wechat_cache_interval():g} 秒 1 张",
+                        f"开头详情页加密：{'开启' if bool(self.wechat_preserve_head.state()) else '关闭'}",
                         f"处理模式：{'OCR增强' if self.wechat_mode == 'ocr' else '快速初稿'}",
                         f"生成时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
                         f"PDF：{named_pdf.name}",
@@ -1690,6 +2053,7 @@ horizontal_rule:
             "--stable-motion-distance", stable_motion_distance,
             "--interval", interval,
             "--pdf-jpeg-quality", pdf_quality,
+            "--preserve-head-sec", "8" if bool(self.wechat_preserve_head.state()) else "0",
         ]
         if self.selected_wechat_stride != "legacy":
             if self.selected_wechat_stride == "auto":
