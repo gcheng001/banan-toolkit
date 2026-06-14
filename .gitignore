@@ -5,3 +5,13 @@
 dist/
 *.bak-*
 Thumbs.db
+
+# Local installed app bundles and support archives kept for launch/backup only.
+# Their bundled Electron/Node/native dependencies are third-party vendor payloads,
+# not project source to audit or patch in this repository.
+.support/
+Folia.app/
+MinerU.app/
+元典脱敏-Tools/
+元典脱敏.app/
+案件看板.app/
