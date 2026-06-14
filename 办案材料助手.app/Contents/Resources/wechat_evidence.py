@@ -1197,6 +1197,7 @@ def cmd_interval_pdf(args: argparse.Namespace) -> None:
     stride_seconds = _parse_stride_seconds(getattr(args, "stride_seconds", ""))
     raw_cache_interval = float(getattr(args, "raw_cache_interval", 0.0) or 0.0)
     raw_cache_dir_arg = (getattr(args, "raw_cache_dir", "") or "").strip()
+    reuse_raw_only = bool(getattr(args, "reuse_raw_only", False))
     if stride_frames is not None and stride_seconds is not None:
         _die("--stride-frames and --stride-seconds cannot be used together.")
     if variants:
@@ -1307,6 +1308,8 @@ def cmd_interval_pdf(args: argparse.Namespace) -> None:
             if raw_frames:
                 print(f"reuse_raw_cache={raw_dir}", file=sys.stderr)
             else:
+                if reuse_raw_only:
+                    _die(f"Raw frame cache not found or empty: {raw_dir}")
                 raw_frames = _extract_frames_burst(
                     video_path=video_path,
                     frames_dir=raw_dir,
@@ -1530,6 +1533,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stride-seconds", default="", help="When --filter auto: keep one frame every N seconds from raw cache")
     p.add_argument("--raw-cache-dir", default="", help="When --filter auto: shared raw frame cache dir; reuse if it already has raw frames")
     p.add_argument("--raw-cache-interval", type=float, default=0.0, help="Seconds between frames in the shared raw cache")
+    p.add_argument("--reuse-raw-only", action="store_true", help="Reuse existing raw frame cache only; fail instead of extracting video")
     p.add_argument("--min-sharpness", type=float, default=None, help="When --filter auto: minimum sharpness score (optional)")
     p.add_argument("--drop-blurry", action="store_true", help="When --filter auto: drop buckets below --min-sharpness")
     p.add_argument("--keep-raw", action="store_true", default=True, help="When --filter auto: keep 原始抽帧/ (default)")

@@ -320,6 +320,7 @@ class Controller(NSObject):
         self.wechat_output_dir = WECHAT_OUTPUT_DIR
         self.wechat_cloud_base_url = WECHAT_DEFAULT_CLOUD_BASE_URL
         self.wechat_cloud_model = WECHAT_DEFAULT_CLOUD_MODEL
+        self.wechat_reuse_raw_only = False
         self.current_accent = C_TEXT_STRONG
         self.current_soft_accent = C_PANEL_BG
         self.output_dir = Path.home() / "Desktop" / "VisionOCR_Output"
@@ -742,7 +743,9 @@ class Controller(NSObject):
         for item in self.files[:200]:
             name = Path(item["path"]).name
             rows.append(f"{name}\t排队中\t0%\t--:--")
-            wechat_rows.append(f"{name}\t已导入\t{self._wechat_stride_label()} / 缓存{self._wechat_cache_interval():g}秒\t点击导出生成新版")
+            cache_dir = self._wechat_video_cache_dir(Path(item["path"]), self._wechat_cache_interval())
+            next_action = "可点重新导出" if any(cache_dir.glob("raw_*.*")) else "先点导出取证材料"
+            wechat_rows.append(f"{name}\t已导入\t{self._wechat_stride_label()} / 缓存{self._wechat_cache_interval():g}秒\t{next_action}")
         if self.wechat_last_rows and len(self.wechat_last_rows) > 1:
             wechat_rows.extend(["", "已生成版本\t状态\t选帧方式\t输出"])
             wechat_rows.extend(self.wechat_last_rows[1:])
@@ -1019,6 +1022,7 @@ class Controller(NSObject):
             if not self.files:
                 self._alert("请先选择视频", "拖入或选择一个微信录屏视频后再开始导出。")
                 return
+            self.wechat_reuse_raw_only = False
             self._run_wechat()
             return
         if self.mode == "ocr":
@@ -1036,6 +1040,26 @@ class Controller(NSObject):
             return
         self._run_docx_text(text)
 
+    @IBAction
+    def rerunWeChatExport_(self, _sender):
+        if self.is_running:
+            return
+        if not self.files:
+            self._alert("请先选择视频", "重新导出需要先选择同一个录屏视频，用它定位原始截图缓存。")
+            return
+        missing = []
+        cache_interval = self._wechat_cache_interval()
+        for item in self.files:
+            path = Path(item["path"])
+            cache_dir = self._wechat_video_cache_dir(path, cache_interval)
+            if not any(cache_dir.glob("raw_*.*")):
+                missing.append(path.name)
+        if missing:
+            self._alert("还没有可复用截图", "请先点“导出取证材料”生成第一版和原始截图缓存，再点“重新导出”。\n\n缺少缓存：\n" + "\n".join(missing[:5]))
+            return
+        self.wechat_reuse_raw_only = True
+        self._run_wechat()
+
     @objc.python_method
     def _set_running_ui(self, running):
         self.btn_start.setEnabled_(not running)
@@ -1043,6 +1067,8 @@ class Controller(NSObject):
         self.btn_start_left_docx.setEnabled_(not running)
         if hasattr(self, "btn_start_left_wechat"):
             self.btn_start_left_wechat.setEnabled_(not running)
+        if hasattr(self, "btn_rerun_left_wechat"):
+            self.btn_rerun_left_wechat.setEnabled_(not running)
         self.btn_pause.setEnabled_(running)
         self.btn_stop.setEnabled_(running)
         if not running:
@@ -1390,8 +1416,8 @@ horizontal_rule:
         self.wechat_mode_control.setAction_("wechatModeChanged:")
         left.addSubview_(self.wechat_mode_control)
 
-        left.addSubview_(_label("原始缓存", 18, left.bounds().size.height - 146, 120, 18, size=12, color=C_DIM))
-        self.wechat_cache_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 178, 284, 28), False)
+        left.addSubview_(_label("原始缓存", 18, left.bounds().size.height - 132, 120, 18, size=12, color=C_DIM))
+        self.wechat_cache_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 160, 284, 28), False)
         for opt in ["0.5 秒/张（默认）", "0.25 秒/张（更细）", "1 秒/张（省空间）"]:
             self.wechat_cache_popup.addItemWithTitle_(opt)
         self.wechat_cache_popup.selectItemAtIndex_(0)
@@ -1399,8 +1425,8 @@ horizontal_rule:
         self.wechat_cache_popup.setAction_("wechatStrideChanged:")
         left.addSubview_(self.wechat_cache_popup)
 
-        left.addSubview_(_label("保留间隔", 18, left.bounds().size.height - 220, 120, 18, size=12, color=C_DIM))
-        self.wechat_stride_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 252, 284, 28), False)
+        left.addSubview_(_label("保留间隔", 18, left.bounds().size.height - 194, 120, 18, size=12, color=C_DIM))
+        self.wechat_stride_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 222, 284, 28), False)
         for opt in [
             "自动判断滚动速度",
             "每 0.5 秒留 1 张",
@@ -1423,39 +1449,44 @@ horizontal_rule:
         self.wechat_stride_popup.setAction_("wechatStrideChanged:")
         left.addSubview_(self.wechat_stride_popup)
 
-        left.addSubview_(_label("输出质量", 18, left.bounds().size.height - 294, 120, 18, size=12, color=C_DIM))
-        self.wechat_quality = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 326, 284, 28), False)
+        left.addSubview_(_label("输出质量", 18, left.bounds().size.height - 256, 120, 18, size=12, color=C_DIM))
+        self.wechat_quality = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 284, 284, 28), False)
         for opt in ["清晰", "平衡", "体积"]:
             self.wechat_quality.addItemWithTitle_(opt)
         self.wechat_quality.selectItemAtIndex_(0)
         left.addSubview_(self.wechat_quality)
 
-        left.addSubview_(_label("选项", 18, left.bounds().size.height - 368, 120, 18, size=12, color=C_DIM))
-        self.wechat_keep_raw = _checkbox("保留原始缓存", 18, left.bounds().size.height - 396, 130, 22, True)
-        self.wechat_context_overlap = _checkbox("相邻页少量重复", 160, left.bounds().size.height - 396, 142, 22, True)
-        self.wechat_local_ocr = _checkbox("本地OCR优先", 18, left.bounds().size.height - 426, 130, 22, True)
-        self.wechat_candidate_ocr = _checkbox("候选页OCR", 160, left.bounds().size.height - 426, 130, 22, False)
-        self.wechat_cloud_ocr = _checkbox("手动云端整理", 18, left.bounds().size.height - 458, 140, 22, False)
+        left.addSubview_(_label("选项", 18, left.bounds().size.height - 326, 120, 18, size=12, color=C_DIM))
+        self.wechat_keep_raw = _checkbox("保留原始缓存", 18, left.bounds().size.height - 352, 130, 22, True)
+        self.wechat_context_overlap = _checkbox("相邻页少量重复", 160, left.bounds().size.height - 352, 142, 22, True)
+        self.wechat_local_ocr = _checkbox("本地OCR优先", 18, left.bounds().size.height - 380, 130, 22, True)
+        self.wechat_candidate_ocr = _checkbox("候选页OCR", 160, left.bounds().size.height - 380, 130, 22, False)
+        self.wechat_cloud_ocr = _checkbox("手动云端整理", 18, left.bounds().size.height - 408, 140, 22, False)
         left.addSubview_(self.wechat_keep_raw)
         left.addSubview_(self.wechat_context_overlap)
         left.addSubview_(self.wechat_local_ocr)
         left.addSubview_(self.wechat_candidate_ocr)
         left.addSubview_(self.wechat_cloud_ocr)
-        left.addSubview_(_btn("云端设置", 176, left.bounds().size.height - 458, 126, 26, self, "configureWeChatCloud:"))
+        left.addSubview_(_btn("云端设置", 176, left.bounds().size.height - 408, 126, 26, self, "configureWeChatCloud:"))
 
-        left.addSubview_(_label("输出目录", 18, left.bounds().size.height - 498, 100, 18, size=12, color=C_DIM))
-        self.out_path_wechat = _input_field(18, left.bounds().size.height - 526, 252, 28)
+        left.addSubview_(_label("输出目录", 18, left.bounds().size.height - 436, 100, 18, size=12, color=C_DIM))
+        self.out_path_wechat = _input_field(18, left.bounds().size.height - 464, 252, 28)
         self.out_path_wechat.setStringValue_(str(self.wechat_output_dir).replace(str(Path.home()), "~"))
         left.addSubview_(self.out_path_wechat)
-        self.btn_out_wechat = _btn("📁", 274, left.bounds().size.height - 526, 28, 28, self, "pickOutputDir:")
+        self.btn_out_wechat = _btn("📁", 274, left.bounds().size.height - 464, 28, 28, self, "pickOutputDir:")
         left.addSubview_(self.btn_out_wechat)
 
-        self.btn_start_left_wechat = _btn("导出取证材料", 18, 14, 284, 34, self, "startProcessing:")
+        self.btn_start_left_wechat = _btn("导出取证材料", 18, 52, 284, 30, self, "startProcessing:")
         _resize(self.btn_start_left_wechat, PIN_BOTTOM)
         left.addSubview_(self.btn_start_left_wechat)
         _set_view_style(self.btn_start_left_wechat, C_PANEL_BG, C_BORDER, 8)
         self.btn_start_left_wechat.setContentTintColor_(C_TEXT_STRONG)
-        _pin_panel_controls_to_top(left, (self.btn_start_left_wechat,))
+        self.btn_rerun_left_wechat = _btn("重新导出（复用截图）", 18, 14, 284, 30, self, "rerunWeChatExport:")
+        _resize(self.btn_rerun_left_wechat, PIN_BOTTOM)
+        left.addSubview_(self.btn_rerun_left_wechat)
+        _set_view_style(self.btn_rerun_left_wechat, C_WHITE, C_BORDER, 8)
+        self.btn_rerun_left_wechat.setContentTintColor_(C_TEXT_STRONG)
+        _pin_panel_controls_to_top(left, (self.btn_start_left_wechat, self.btn_rerun_left_wechat))
 
         right = NSView.alloc().initWithFrame_(NSMakeRect(356, 20, self.wechat_page.bounds().size.width - 376, body_h - 40))
         _resize(right, FILL_WIDTH | FILL_HEIGHT)
@@ -1464,10 +1495,12 @@ horizontal_rule:
         self.wechat_drop = DropZone.alloc().initWithFrame_controller_(NSMakeRect(0, right.bounds().size.height - 230, right.bounds().size.width, 230), self)
         _resize(self.wechat_drop, FILL_WIDTH | PIN_TOP)
         right.addSubview_(self.wechat_drop)
-        wechat_title = _label("拖入聊天录屏", right.bounds().size.width / 2 - 100, 132, 200, 30, size=17, weight=0.75, color=C_TEXT_STRONG, align=2)
-        wechat_subtitle = _label("MP4 / MOV / M4V，可批量处理", right.bounds().size.width / 2 - 150, 102, 300, 22, size=13, color=C_DIM, align=2)
-        self.wechat_drop.addSubview_(_register_file_drag(_center_in_parent(wechat_title)))
-        self.wechat_drop.addSubview_(_register_file_drag(_center_in_parent(wechat_subtitle)))
+        wechat_title = _label("拖入聊天录屏", 0, 132, right.bounds().size.width, 30, size=17, weight=0.75, color=C_TEXT_STRONG, align=1)
+        wechat_subtitle = _label("MP4 / MOV / M4V，可批量处理", 0, 102, right.bounds().size.width, 22, size=13, color=C_DIM, align=1)
+        _resize(wechat_title, FILL_WIDTH | PIN_TOP)
+        _resize(wechat_subtitle, FILL_WIDTH | PIN_TOP)
+        self.wechat_drop.addSubview_(_register_file_drag(wechat_title))
+        self.wechat_drop.addSubview_(_register_file_drag(wechat_subtitle))
         self.btn_pick_wechat = _btn("选择录屏", right.bounds().size.width / 2 - 48, 72, 96, 32, self, "selectFiles:")
         self.wechat_drop.addSubview_(_register_file_drag(_center_in_parent(self.btn_pick_wechat)))
         _set_view_style(self.btn_pick_wechat, C_WHITE, C_BORDER, 8)
@@ -1685,7 +1718,7 @@ horizontal_rule:
         self._start_time = time.time()
         self.progress_bar.setValue_(0.0)
         self.pct_label.setStringValue_("0%")
-        self.status_label.setStringValue_("微信录屏导出中...")
+        self.status_label.setStringValue_("正在复用截图重新导出..." if self.wechat_reuse_raw_only else "微信录屏导出中...")
         self._set_running_ui(True)
         threading.Thread(target=self._timer_loop, daemon=True).start()
         threading.Thread(target=self._wechat_thread, daemon=True).start()
@@ -1712,13 +1745,16 @@ horizontal_rule:
             cache_interval = self._wechat_cache_interval()
             display_stride_label = f"{stride_label} / 缓存{cache_interval:g}秒"
             raw_cache_dir = self._wechat_video_cache_dir(path, cache_interval)
-            self.status_label.setStringValue_(f"正在导出：{path.name}（{profile_label} / {version_label}）")
+            action_label = "重新导出" if self.wechat_reuse_raw_only else "导出"
+            self.status_label.setStringValue_(f"正在{action_label}：{path.name}（{profile_label} / {version_label}）")
             cmd = [
                 sys.executable, str(WECHAT_CLI), "interval-pdf", str(path),
                 "--out-dir", str(export_dir),
                 "--raw-cache-dir", str(raw_cache_dir),
                 *profile_args,
             ]
+            if self.wechat_reuse_raw_only:
+                cmd.append("--reuse-raw-only")
             proc = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             while proc.poll() is None:
                 if self.should_stop:
@@ -1824,6 +1860,7 @@ horizontal_rule:
         self._timer_stop = True
         self.is_running = False
         self._set_running_ui(False)
+        self.wechat_reuse_raw_only = False
         if self.should_stop:
             self.status_label.setStringValue_("已停止")
         else:
