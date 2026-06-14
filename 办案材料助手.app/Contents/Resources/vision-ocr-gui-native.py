@@ -22,16 +22,24 @@ from Cocoa import (
     NSFont,
     NSMakeRange,
     NSMakeRect,
+    NSMakeSize,
     NSOpenPanel,
     NSPopUpButton,
     NSScrollView,
     NSTextField,
     NSTextView,
+    NSViewHeightSizable,
+    NSViewMaxXMargin,
+    NSViewMaxYMargin,
+    NSViewMinXMargin,
+    NSViewMinYMargin,
+    NSViewWidthSizable,
     NSView,
     NSWindow,
     NSObject,
 )
 from objc import IBAction
+from Foundation import NSURL
 from PyObjCTools import AppHelper
 
 
@@ -63,13 +71,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vision_ocr_utils import DocumentType, TYPE_OPTIONS_GUI
 
 _NSFilenamesPboardType = "NSFilenamesPboardType"
+_NSPasteboardTypeFileURL = "public.file-url"
+_NSURLPboardType = "NSURLPboardType"
 
 CLI = shutil.which("vision-ocr-pdf") or str(Path(__file__).resolve().parent / "vision-ocr-pdf")
 DOCX_CLI = shutil.which("md-to-docx") or str(Path(__file__).resolve().parent / "md-to-docx")
 TRANSCRIPT_CLI = shutil.which("media-to-transcript") or str(Path(__file__).resolve().parent / "media-to-transcript")
 MARKDOWN_CLI = shutil.which("office-to-markdown") or str(Path.home() / ".local/bin/office-to-markdown")
+MINERU_CLI = shutil.which("mineru-local") or str(Path.home() / ".local/bin/mineru-local")
+LEGAL_OCR_CLI = shutil.which("legal-ocr-convert") or str(Path.home() / ".local/bin/legal-ocr-convert")
 WECHAT_PROJECT_ROOT = Path("/Users/Apple/Codex/wechat-evidence")
-WECHAT_CLI = WECHAT_PROJECT_ROOT / "wechat_evidence.py"
+WECHAT_CLI = Path(__file__).resolve().parent / "wechat_evidence.py"
+if not WECHAT_CLI.exists():
+    WECHAT_CLI = WECHAT_PROJECT_ROOT / "wechat_evidence.py"
 WECHAT_OUTPUT_DIR = Path.home() / "Desktop" / "录屏取证输出"
 WECHAT_KEYCHAIN_SERVICE = "wechat-evidence-cloud"
 WECHAT_DEFAULT_CLOUD_BASE_URL = "https://api.deepseek.com"
@@ -175,6 +189,38 @@ def _fill_view(view, bg):
     view.layer().setBackgroundColor_(bg.CGColor())
 
 
+def _resize(view, mask):
+    view.setAutoresizingMask_(mask)
+    return view
+
+
+def _register_file_drag(view):
+    view.registerForDraggedTypes_([_NSFilenamesPboardType, _NSPasteboardTypeFileURL, _NSURLPboardType])
+    return view
+
+
+def _pin_panel_controls_to_top(panel, bottom_views=()):
+    bottom_ids = {id(view) for view in bottom_views}
+    for view in panel.subviews():
+        if id(view) not in bottom_ids:
+            _resize(view, PIN_TOP)
+
+
+def _center_in_parent(view, pin_top=True):
+    mask = NSViewMinXMargin | NSViewMaxXMargin
+    if pin_top:
+        mask |= PIN_TOP
+    _resize(view, mask)
+    return view
+
+
+PIN_TOP = NSViewMinYMargin
+PIN_BOTTOM = NSViewMaxYMargin
+PIN_RIGHT = NSViewMinXMargin
+FILL_WIDTH = NSViewWidthSizable
+FILL_HEIGHT = NSViewHeightSizable
+
+
 class ProgressBar(NSView):
     def initWithFrame_(self, frame):
         self = objc.super(ProgressBar, self).initWithFrame_(frame)
@@ -208,7 +254,7 @@ class DropZone(NSView):
         if self is None:
             return None
         self.ctrl = ctrl
-        self.registerForDraggedTypes_([_NSFilenamesPboardType])
+        _register_file_drag(self)
         return self
 
     def drawRect_(self, _rect):
@@ -227,7 +273,11 @@ class DropZone(NSView):
     def performDragOperation_(self, sender):
         pb = sender.draggingPasteboard()
         paths = pb.propertyListForType_(_NSFilenamesPboardType) or []
-        allowed = TO_MARKDOWN_EXTS if self.ctrl.mode in ("ocr", "wechat") else DOCX_EXTS
+        if not paths:
+            urls = pb.readObjectsForClasses_options_([NSURL], None) or []
+            paths = [url.path() for url in urls if url and url.isFileURL()]
+        allowed = VIDEO_EXTS if self.ctrl.mode == "wechat" else (TO_MARKDOWN_EXTS if self.ctrl.mode == "ocr" else DOCX_EXTS)
+        added = 0
         for p in paths:
             p = str(p)
             if os.path.isdir(p):
@@ -236,12 +286,13 @@ class DropZone(NSView):
                     if os.path.isfile(fp):
                         ext = Path(fp).suffix.lower().lstrip(".")
                         if ext in allowed:
-                            self.ctrl._add_file(fp)
+                            added += self.ctrl._add_file(fp)
             elif os.path.isfile(p):
                 ext = Path(p).suffix.lower().lstrip(".")
                 if ext in allowed:
-                    self.ctrl._add_file(p)
+                    added += self.ctrl._add_file(p)
         self.ctrl._refresh_files()
+        self.ctrl.status_label.setStringValue_(f"已添加 {added} 个文件" if added else "没有可用文件")
         return True
 
 
@@ -261,7 +312,9 @@ class Controller(NSObject):
         self.selected_type = DocumentType.AUTO
         self.selected_docx_type = "general"
         self.selected_whisper_model = "base"
+        self.selected_ocr_engine = "mineru"
         self.wechat_mode = "quick"
+        self.selected_wechat_stride = "auto"
         self.wechat_output_dir = WECHAT_OUTPUT_DIR
         self.wechat_cloud_base_url = WECHAT_DEFAULT_CLOUD_BASE_URL
         self.wechat_cloud_model = WECHAT_DEFAULT_CLOUD_MODEL
@@ -269,6 +322,7 @@ class Controller(NSObject):
         self.current_soft_accent = C_PANEL_BG
         self.output_dir = Path.home() / "Desktop" / "VisionOCR_Output"
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self._active_panel = None
         self._start_time = None
         self._timer_stop = False
         self._build_ui()
@@ -289,10 +343,12 @@ class Controller(NSObject):
         )
         win.setTitle_("VisionOCR 办案助手")
         win.setAppearance_(NSAppearance.appearanceNamed_("NSAppearanceNameAqua"))
+        win.setMinSize_(NSMakeSize(1080, 800))
         self.window = win
         root = win.contentView()
 
         self.sidebar = NSView.alloc().initWithFrame_(NSMakeRect(0, height - topbar_h, width, topbar_h))
+        _resize(self.sidebar, FILL_WIDTH | PIN_TOP)
         root.addSubview_(self.sidebar)
         _set_view_style(self.sidebar, C_HEADER_BG, C_BORDER_SOFT, 0)
 
@@ -317,34 +373,44 @@ class Controller(NSObject):
 
         self.btn_history = _btn("◷ 历史记录", width - 238, 22, 104, 30, self, "openHistory:")
         self.btn_feedback = _btn("○ 反馈", width - 122, 22, 76, 30, self, "noop:")
+        _resize(self.btn_history, PIN_RIGHT)
+        _resize(self.btn_feedback, PIN_RIGHT)
         self.sidebar.addSubview_(self.btn_history)
         self.sidebar.addSubview_(self.btn_feedback)
 
         main_h = height - topbar_h
         self.main = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, main_h))
+        _resize(self.main, FILL_WIDTH | FILL_HEIGHT)
         root.addSubview_(self.main)
         _fill_view(self.main, C_APP_BG)
 
         self.page_title = _label("材料转 MD", 48, main_h - 40, 160, 24, size=15, weight=0.65, color=C_TEXT_STRONG)
         self.page_subtitle = _label("将案卷 PDF、图片、Office 文档转为可检索 Markdown", 184, main_h - 40, 520, 24, size=13, color=C_DIM)
+        _resize(self.page_title, PIN_TOP)
+        _resize(self.page_subtitle, PIN_TOP | FILL_WIDTH)
         self.main.addSubview_(self.page_title)
         self.main.addSubview_(self.page_subtitle)
 
         self.bottom = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, bottom_h))
+        _resize(self.bottom, FILL_WIDTH | PIN_BOTTOM)
         self.main.addSubview_(self.bottom)
         _set_view_style(self.bottom, C_WHITE, C_BORDER, 0)
         self.status_label = _label("已就绪", 48, 22, 260, 20, size=13, color=C_DIM)
         self.bottom.addSubview_(self.status_label)
-        self.progress_bar = ProgressBar.alloc().initWithFrame_(NSMakeRect(470, 25, 320, 7))
+        self.progress_bar = ProgressBar.alloc().initWithFrame_(NSMakeRect(430, 25, 260, 7))
         self.bottom.addSubview_(self.progress_bar)
-        self.pct_label = _label("0%", 804, 18, 44, 20, size=13, weight=0.45)
-        self.timer_label = _label("00:00", 858, 18, 70, 20, size=13, color=C_DIM)
+        self.pct_label = _label("0%", 700, 18, 44, 20, size=13, weight=0.45)
+        self.timer_label = _label("00:00", 758, 18, 72, 20, size=13, color=C_DIM)
+        _resize(self.pct_label, PIN_RIGHT)
+        _resize(self.timer_label, PIN_RIGHT)
         self.bottom.addSubview_(self.pct_label)
         self.bottom.addSubview_(self.timer_label)
-        self.btn_clear = _btn("清空", 870, 13, 78, 30, self, "clearList:")
-        self.btn_pause = _btn("暂停", 958, 13, 78, 30, self, "pauseProcessing:")
-        self.btn_stop = _btn("停止", 1046, 13, 78, 30, self, "stopProcessing:")
-        self.btn_start = _btn("开始转换", 1136, 13, 108, 30, self, "startProcessing:")
+        self.btn_clear = _btn("清空", 846, 13, 78, 30, self, "clearList:")
+        self.btn_pause = _btn("暂停", 932, 13, 78, 30, self, "pauseProcessing:")
+        self.btn_stop = _btn("停止", 1018, 13, 78, 30, self, "stopProcessing:")
+        self.btn_start = _btn("开始转换", 1108, 13, 116, 30, self, "startProcessing:")
+        for btn in (self.btn_clear, self.btn_pause, self.btn_stop, self.btn_start):
+            _resize(btn, PIN_RIGHT)
         self.btn_pause.setEnabled_(False)
         self.btn_stop.setEnabled_(False)
         self.bottom.addSubview_(self.btn_clear)
@@ -355,12 +421,15 @@ class Controller(NSObject):
         body_h = main_h - header_h - bottom_h
         self.ocr_page = NSView.alloc().initWithFrame_(NSMakeRect(0, bottom_h, width, body_h))
         self.docx_page = NSView.alloc().initWithFrame_(NSMakeRect(0, bottom_h, width, body_h))
+        _resize(self.ocr_page, FILL_WIDTH | FILL_HEIGHT)
+        _resize(self.docx_page, FILL_WIDTH | FILL_HEIGHT)
         self.main.addSubview_(self.ocr_page)
         self.main.addSubview_(self.docx_page)
 
         self._build_ocr_page(body_h)
         self._build_docx_page(body_h)
         self.wechat_page = NSView.alloc().initWithFrame_(NSMakeRect(0, bottom_h, width, body_h))
+        _resize(self.wechat_page, FILL_WIDTH | FILL_HEIGHT)
         self.main.addSubview_(self.wechat_page)
         self._build_wechat_page(body_h)
         self.wechat_page.setHidden_(True)
@@ -372,6 +441,7 @@ class Controller(NSObject):
     def _build_ocr_page(self, body_h):
         _fill_view(self.ocr_page, C_APP_BG)
         left = NSView.alloc().initWithFrame_(NSMakeRect(20, 20, 320, body_h - 40))
+        _resize(left, FILL_HEIGHT | NSViewMaxXMargin)
         _set_view_style(left, C_WHITE, C_BORDER, 12)
         self.ocr_page.addSubview_(left)
 
@@ -401,48 +471,74 @@ class Controller(NSObject):
         self.whisper_popup.setAction_("whisperChanged:")
         left.addSubview_(self.whisper_popup)
 
-        left.addSubview_(_label("输出目录", 18, left.bounds().size.height - 268, 100, 18, size=12, color=C_DIM))
-        self.out_path_ocr = _input_field(18, left.bounds().size.height - 296, 252, 28)
+        left.addSubview_(_label("识别引擎", 18, left.bounds().size.height - 256, 160, 18, size=12, color=C_DIM))
+        self.ocr_engine_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 284, 284, 28), False)
+        for opt in ["本地 MinerU（默认）", "Apple VisionOCR", "legal-ocr 自动", "legal-ocr MinerU", "PaddleOCR-VL（需配置）"]:
+            self.ocr_engine_popup.addItemWithTitle_(opt)
+        self.ocr_engine_popup.setTarget_(self)
+        self.ocr_engine_popup.setAction_("ocrEngineChanged:")
+        left.addSubview_(self.ocr_engine_popup)
+
+        left.addSubview_(_label("输出目录", 18, left.bounds().size.height - 326, 100, 18, size=12, color=C_DIM))
+        self.out_path_ocr = _input_field(18, left.bounds().size.height - 354, 252, 28)
         self.out_path_ocr.setStringValue_(str(self.output_dir).replace(str(Path.home()), "~"))
         left.addSubview_(self.out_path_ocr)
-        self.btn_out_ocr = _btn("📁", 274, left.bounds().size.height - 296, 28, 28, self, "pickOutputDir:")
+        self.btn_out_ocr = _btn("📁", 274, left.bounds().size.height - 354, 28, 28, self, "pickOutputDir:")
         left.addSubview_(self.btn_out_ocr)
 
         self.btn_start_left_ocr = _btn("▶  转为 Markdown", 18, 14, 284, 34, self, "startProcessing:")
+        _resize(self.btn_start_left_ocr, PIN_BOTTOM)
         left.addSubview_(self.btn_start_left_ocr)
+        _pin_panel_controls_to_top(left, (self.btn_start_left_ocr,))
 
         right = NSView.alloc().initWithFrame_(NSMakeRect(356, 20, self.ocr_page.bounds().size.width - 376, body_h - 40))
+        _resize(right, FILL_WIDTH | FILL_HEIGHT)
         self.ocr_page.addSubview_(right)
 
-        self.drop_zone = DropZone.alloc().initWithFrame_controller_(NSMakeRect(0, right.bounds().size.height - 230, right.bounds().size.width, 230), self)
+        self.drop_zone = DropZone.alloc().initWithFrame_controller_(NSMakeRect(0, right.bounds().size.height - 210, right.bounds().size.width, 210), self)
+        _resize(self.drop_zone, FILL_WIDTH | PIN_TOP)
         right.addSubview_(self.drop_zone)
-        self.drop_zone.addSubview_(_label("拖入文件或点击选择", right.bounds().size.width / 2 - 110, 130, 220, 28, size=16, weight=0.65, color=C_TEXT_STRONG))
-        self.drop_zone.addSubview_(_label("支持 PDF / 图片 / Word / Excel / 音视频", right.bounds().size.width / 2 - 150, 102, 300, 22, size=13, color=C_DIM))
-        self.btn_pick = _btn("选择文件", right.bounds().size.width / 2 - 44, 72, 88, 32, self, "selectFiles:")
-        self.drop_zone.addSubview_(self.btn_pick)
+        dz_title = _label("拖入文件或点击选择", right.bounds().size.width / 2 - 110, 116, 220, 28, size=16, weight=0.65, color=C_TEXT_STRONG, align=2)
+        dz_subtitle = _label("支持 PDF / 图片 / Word / Excel / 音视频", right.bounds().size.width / 2 - 150, 88, 300, 22, size=13, color=C_DIM, align=2)
+        self.drop_zone.addSubview_(_register_file_drag(_center_in_parent(dz_title)))
+        self.drop_zone.addSubview_(_register_file_drag(_center_in_parent(dz_subtitle)))
+        self.btn_pick = _btn("选择文件", right.bounds().size.width / 2 - 44, 56, 88, 32, self, "selectFiles:")
+        self.drop_zone.addSubview_(_register_file_drag(_center_in_parent(self.btn_pick)))
 
-        right.addSubview_(_label("或直接粘贴链接（支持主流平台）", 0, right.bounds().size.height - 258, 260, 20, size=12, color=C_DIM))
-        self.link_field = _input_field(0, right.bounds().size.height - 290, right.bounds().size.width - 92, 30, "https://youtube.com/...  或  https://...")
-        self.btn_add_link = _btn("添加", right.bounds().size.width - 84, right.bounds().size.height - 290, 84, 30, self, "addLink:")
+        link_label = _label("或直接粘贴链接（支持主流平台）", 0, right.bounds().size.height - 248, 260, 20, size=12, color=C_DIM)
+        _resize(link_label, PIN_TOP)
+        right.addSubview_(link_label)
+        self.link_field = _input_field(0, right.bounds().size.height - 282, right.bounds().size.width - 92, 30, "https://youtube.com/...  或  https://...")
+        self.btn_add_link = _btn("添加", right.bounds().size.width - 84, right.bounds().size.height - 282, 84, 30, self, "addLink:")
+        _resize(self.link_field, FILL_WIDTH | PIN_TOP)
+        _resize(self.btn_add_link, PIN_RIGHT | PIN_TOP)
         right.addSubview_(self.link_field)
         right.addSubview_(self.btn_add_link)
 
-        right.addSubview_(_label("去水印（可选，转换完成后可执行）", 0, right.bounds().size.height - 324, 260, 20, size=13, color=C_DIM))
+        watermark_label = _label("去水印（可选，转换完成后可执行）", 0, right.bounds().size.height - 332, 260, 20, size=13, color=C_DIM)
+        _resize(watermark_label, PIN_TOP)
+        right.addSubview_(watermark_label)
         self.watermark_field = _input_field(
             0,
-            right.bounds().size.height - 356,
+            right.bounds().size.height - 366,
             right.bounds().size.width - 124,
             30,
             "留空为不处理；示例：高城13303201410164518",
         )
         right.addSubview_(self.watermark_field)
-        self.btn_remove_watermark = _btn("一键去水印", right.bounds().size.width - 116, right.bounds().size.height - 356, 116, 30, self, "removeWatermark:")
+        self.btn_remove_watermark = _btn("一键去水印", right.bounds().size.width - 116, right.bounds().size.height - 366, 116, 30, self, "removeWatermark:")
+        _resize(self.watermark_field, FILL_WIDTH | PIN_TOP)
+        _resize(self.btn_remove_watermark, PIN_RIGHT | PIN_TOP)
         right.addSubview_(self.btn_remove_watermark)
 
-        right.addSubview_(_label("任务队列", 0, right.bounds().size.height - 394, 120, 22, size=16, weight=0.65, color=C_TEXT_STRONG))
-        table_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, right.bounds().size.width, right.bounds().size.height - 398))
+        queue_label = _label("任务队列", 0, right.bounds().size.height - 414, 120, 22, size=16, weight=0.65, color=C_TEXT_STRONG)
+        _resize(queue_label, PIN_TOP)
+        right.addSubview_(queue_label)
+        table_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, right.bounds().size.width, right.bounds().size.height - 446))
+        _resize(table_scroll, FILL_WIDTH | FILL_HEIGHT)
         table_scroll.setHasVerticalScroller_(True)
-        self.task_text = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, right.bounds().size.width, right.bounds().size.height - 398))
+        self.task_text = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, right.bounds().size.width, right.bounds().size.height - 446))
+        _resize(self.task_text, FILL_WIDTH | FILL_HEIGHT)
         self.task_text.setEditable_(False)
         self.task_text.setFont_(_font(12))
         table_scroll.setDocumentView_(self.task_text)
@@ -453,6 +549,7 @@ class Controller(NSObject):
     def _build_docx_page(self, body_h):
         _fill_view(self.docx_page, C_APP_BG)
         left = NSView.alloc().initWithFrame_(NSMakeRect(20, 20, 320, body_h - 40))
+        _resize(left, FILL_HEIGHT | NSViewMaxXMargin)
         _set_view_style(left, C_WHITE, C_BORDER, 12)
         self.docx_page.addSubview_(left)
 
@@ -463,53 +560,101 @@ class Controller(NSObject):
         self.input_mode.selectItemAtIndex_(0)
         left.addSubview_(self.input_mode)
 
-        self.docx_drop = DropZone.alloc().initWithFrame_controller_(NSMakeRect(18, left.bounds().size.height - 262, 284, 188), self)
+        self.docx_drop = DropZone.alloc().initWithFrame_controller_(NSMakeRect(18, left.bounds().size.height - 188, 284, 104), self)
         left.addSubview_(self.docx_drop)
-        self.docx_drop.addSubview_(_label("拖入 Markdown 文件", 84, 108, 170, 24, size=14, weight=0.55))
-        self.docx_drop.addSubview_(_label("支持 .md / .markdown / .txt", 70, 84, 170, 20, size=12, color=C_DIM))
-        self.btn_pick_docx = _btn("选择文件", 96, 44, 96, 30, self, "selectFiles:")
-        self.docx_drop.addSubview_(self.btn_pick_docx)
+        self.docx_drop.addSubview_(_register_file_drag(_label("拖入 Markdown 文件", 57, 58, 170, 24, size=14, weight=0.55, align=2)))
+        self.docx_drop.addSubview_(_register_file_drag(_label("支持 .md / .txt", 42, 38, 200, 20, size=12, color=C_DIM, align=2)))
+        self.btn_pick_docx = _btn("选择文件", 96, 10, 96, 26, self, "selectFiles:")
+        self.docx_drop.addSubview_(_register_file_drag(self.btn_pick_docx))
 
-        left.addSubview_(_label("输出设置", 18, left.bounds().size.height - 292, 120, 22, size=15, weight=0.65, color=C_TEXT_STRONG))
-        left.addSubview_(_label("输出目录", 18, left.bounds().size.height - 318, 120, 18, size=12, color=C_DIM))
-        self.out_path_docx = _input_field(18, left.bounds().size.height - 346, 252, 28)
+        left.addSubview_(_label("输出设置", 18, left.bounds().size.height - 216, 120, 22, size=15, weight=0.65, color=C_TEXT_STRONG))
+        left.addSubview_(_label("输出目录", 18, left.bounds().size.height - 242, 120, 18, size=12, color=C_DIM))
+        self.out_path_docx = _input_field(18, left.bounds().size.height - 270, 252, 28)
         self.out_path_docx.setStringValue_(str(self.output_dir).replace(str(Path.home()), "~"))
         left.addSubview_(self.out_path_docx)
-        self.btn_out_docx = _btn("📁", 274, left.bounds().size.height - 346, 28, 28, self, "pickOutputDir:")
+        self.btn_out_docx = _btn("📁", 274, left.bounds().size.height - 270, 28, 28, self, "pickOutputDir:")
         left.addSubview_(self.btn_out_docx)
 
-        left.addSubview_(_label("页面设置", 18, left.bounds().size.height - 378, 120, 18, size=12, color=C_DIM))
-        self.page_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 406, 136, 28), False)
+        left.addSubview_(_label("页面设置", 18, left.bounds().size.height - 300, 120, 18, size=12, color=C_DIM))
+        self.page_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 328, 136, 28), False)
         self.page_popup.addItemWithTitle_("A4（标准）")
         self.page_popup.addItemWithTitle_("A3")
         self.page_popup.addItemWithTitle_("Letter")
         left.addSubview_(self.page_popup)
-        self.margin_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(166, left.bounds().size.height - 406, 136, 28), False)
+        self.margin_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(166, left.bounds().size.height - 328, 136, 28), False)
         self.margin_popup.addItemWithTitle_("标准（2.54cm）")
         self.margin_popup.addItemWithTitle_("窄")
         self.margin_popup.addItemWithTitle_("宽")
         left.addSubview_(self.margin_popup)
 
+        left.addSubview_(_label("段落", 18, left.bounds().size.height - 360, 120, 18, size=12, color=C_DIM))
+        self.first_indent_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 388, 136, 28), False)
+        for opt in ["首行 2 字符", "无缩进", "首行 4 字符"]:
+            self.first_indent_popup.addItemWithTitle_(opt)
+        left.addSubview_(self.first_indent_popup)
+        self.line_spacing_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(166, left.bounds().size.height - 388, 136, 28), False)
+        for opt in ["1.5 倍行距", "1.0 倍行距", "1.15 倍行距", "2.0 倍行距"]:
+            self.line_spacing_popup.addItemWithTitle_(opt)
+        left.addSubview_(self.line_spacing_popup)
+
+        left.addSubview_(_label("字体", 18, left.bounds().size.height - 420, 120, 18, size=12, color=C_DIM))
+        self.font_preset_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 448, 284, 28), False)
+        for opt in ["法律文书默认", "法院常用", "通用宋体", "屏幕友好"]:
+            self.font_preset_popup.addItemWithTitle_(opt)
+        left.addSubview_(self.font_preset_popup)
+
+        left.addSubview_(_label("标题字体 / 正文字体", 18, left.bounds().size.height - 480, 160, 18, size=12, color=C_DIM))
+        self.title_font_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 508, 136, 28), False)
+        for opt in ["黑体", "宋体", "仿宋", "微软雅黑"]:
+            self.title_font_popup.addItemWithTitle_(opt)
+        left.addSubview_(self.title_font_popup)
+        self.body_font_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(166, left.bounds().size.height - 508, 136, 28), False)
+        for opt in ["仿宋", "宋体", "微软雅黑", "苹方"]:
+            self.body_font_popup.addItemWithTitle_(opt)
+        left.addSubview_(self.body_font_popup)
+
+        left.addSubview_(_label("标题字号 / 正文字号", 18, left.bounds().size.height - 536, 160, 18, size=12, color=C_DIM))
+        self.title_size_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 564, 136, 28), False)
+        for opt in ["15 pt", "16 pt", "18 pt", "22 pt"]:
+            self.title_size_popup.addItemWithTitle_(opt)
+        left.addSubview_(self.title_size_popup)
+        self.body_size_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(166, left.bounds().size.height - 564, 136, 28), False)
+        for opt in ["12 pt", "10.5 pt", "14 pt", "16 pt"]:
+            self.body_size_popup.addItemWithTitle_(opt)
+        left.addSubview_(self.body_size_popup)
+
         self.btn_start_left_docx = _btn("⇄  开始转换", 18, 14, 284, 34, self, "startProcessing:")
+        _resize(self.btn_start_left_docx, PIN_BOTTOM)
         left.addSubview_(self.btn_start_left_docx)
+        self.btn_start_left_docx.setHidden_(True)
+        _pin_panel_controls_to_top(left, (self.btn_start_left_docx,))
 
         right = NSView.alloc().initWithFrame_(NSMakeRect(356, 20, self.docx_page.bounds().size.width - 376, body_h - 40))
+        _resize(right, FILL_WIDTH | FILL_HEIGHT)
         self.docx_page.addSubview_(right)
 
-        right.addSubview_(_label("Markdown 预览与编辑（可选）", 0, right.bounds().size.height - 32, 240, 22, size=16, weight=0.65, color=C_TEXT_STRONG))
-        md_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, right.bounds().size.height - 280, right.bounds().size.width, 248))
+        md_title = _label("Markdown 预览与编辑（可选）", 0, right.bounds().size.height - 32, 240, 22, size=16, weight=0.65, color=C_TEXT_STRONG)
+        _resize(md_title, PIN_TOP)
+        right.addSubview_(md_title)
+        md_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, right.bounds().size.height - 242, right.bounds().size.width, 198))
+        _resize(md_scroll, FILL_WIDTH | PIN_TOP)
         md_scroll.setHasVerticalScroller_(True)
-        self.md_editor = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, right.bounds().size.width, 248))
+        self.md_editor = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, right.bounds().size.width, 198))
+        _resize(self.md_editor, FILL_WIDTH | FILL_HEIGHT)
         self.md_editor.setEditable_(True)
         self.md_editor.setFont_(_font(15))
         md_scroll.setDocumentView_(self.md_editor)
         _set_view_style(md_scroll, C_WHITE, C_BORDER, 10)
         right.addSubview_(md_scroll)
 
-        right.addSubview_(_label("Word 预览（实时预览转换效果）", 0, right.bounds().size.height - 312, 260, 22, size=16, weight=0.65, color=C_TEXT_STRONG))
-        preview_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, right.bounds().size.width, right.bounds().size.height - 320))
+        preview_title = _label("Word 预览（实时预览转换效果）", 0, right.bounds().size.height - 284, 260, 22, size=16, weight=0.65, color=C_TEXT_STRONG)
+        _resize(preview_title, PIN_TOP)
+        right.addSubview_(preview_title)
+        preview_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, right.bounds().size.width, right.bounds().size.height - 318))
+        _resize(preview_scroll, FILL_WIDTH | FILL_HEIGHT)
         preview_scroll.setHasVerticalScroller_(True)
-        self.word_preview = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, right.bounds().size.width, right.bounds().size.height - 320))
+        self.word_preview = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, right.bounds().size.width, right.bounds().size.height - 318))
+        _resize(self.word_preview, FILL_WIDTH | FILL_HEIGHT)
         self.word_preview.setEditable_(False)
         self.word_preview.setFont_(_font(16))
         self.word_preview.setString_("办案报告：\n\n（此处显示转换后的 Word 版式预览摘要）")
@@ -574,8 +719,13 @@ class Controller(NSObject):
 
     @objc.python_method
     def _add_file(self, path):
+        ext = Path(path).suffix.lower().lstrip(".")
+        if ext not in self._allowed_exts():
+            return 0
         if path not in [item["path"] for item in self.files]:
             self.files.append({"path": path})
+            return 1
+        return 0
 
     @objc.python_method
     def _refresh_files(self):
@@ -648,6 +798,25 @@ class Controller(NSObject):
         self.selected_whisper_model = model_map.get(sender.titleOfSelectedItem(), "base")
 
     @IBAction
+    def ocrEngineChanged_(self, sender):
+        engine_map = {
+            "本地 MinerU（默认）": "mineru",
+            "Apple VisionOCR": "visionocr",
+            "legal-ocr 自动": "legalocr-auto",
+            "legal-ocr MinerU": "legalocr-mineru",
+            "PaddleOCR-VL（需配置）": "legalocr-paddle",
+        }
+        self.selected_ocr_engine = engine_map.get(sender.titleOfSelectedItem(), "mineru")
+
+    @objc.python_method
+    def _allowed_exts(self):
+        if self.mode == "wechat":
+            return VIDEO_EXTS
+        if self.mode == "docx":
+            return DOCX_EXTS
+        return TO_MARKDOWN_EXTS
+
+    @IBAction
     def addLink_(self, _sender):
         url = self.link_field.stringValue().strip()
         if url and url not in self.links:
@@ -660,13 +829,27 @@ class Controller(NSObject):
         panel.setCanChooseFiles_(False)
         panel.setCanChooseDirectories_(True)
         panel.setAllowsMultipleSelection_(False)
-        if panel.runModal() == 1 and panel.URLs():
-            path = Path(panel.URLs()[0].path())
-            path.mkdir(parents=True, exist_ok=True)
-            self.output_dir = path
-            shown = str(path).replace(str(Path.home()), "~")
-            self.out_path_ocr.setStringValue_(shown)
-            self.out_path_docx.setStringValue_(shown)
+        self._active_panel = panel
+        self.status_label.setStringValue_("等待选择输出目录...")
+
+        def done(result):
+            try:
+                if result == 1 and panel.URLs():
+                    path = Path(panel.URLs()[0].path())
+                    path.mkdir(parents=True, exist_ok=True)
+                    self.output_dir = path
+                    shown = str(path).replace(str(Path.home()), "~")
+                    self.out_path_ocr.setStringValue_(shown)
+                    self.out_path_docx.setStringValue_(shown)
+                    if hasattr(self, "out_path_wechat"):
+                        self.out_path_wechat.setStringValue_(shown)
+                    self.status_label.setStringValue_("输出目录已更新")
+                else:
+                    self.status_label.setStringValue_("已取消选择")
+            finally:
+                self._active_panel = None
+
+        panel.beginSheetModalForWindow_completionHandler_(self.window, done)
 
     @IBAction
     def selectFiles_(self, _sender):
@@ -674,11 +857,23 @@ class Controller(NSObject):
         panel.setAllowsMultipleSelection_(True)
         panel.setCanChooseFiles_(True)
         panel.setCanChooseDirectories_(False)
-        panel.setAllowedFileTypes_(sorted(self._allowed_exts()))
-        if panel.runModal() == 1:
-            for url in panel.URLs():
-                self._add_file(url.path())
-            self._refresh_files()
+        self._active_panel = panel
+        self.status_label.setStringValue_("等待选择文件...")
+
+        def done(result):
+            try:
+                if result == 1:
+                    added = 0
+                    for url in panel.URLs():
+                        added += self._add_file(url.path())
+                    self._refresh_files()
+                    self.status_label.setStringValue_(f"已添加 {added} 个文件" if added else "没有可用文件")
+                else:
+                    self.status_label.setStringValue_("已取消选择")
+            finally:
+                self._active_panel = None
+
+        panel.beginSheetModalForWindow_completionHandler_(self.window, done)
 
     @IBAction
     def pauseProcessing_(self, _sender):
@@ -858,6 +1053,10 @@ class Controller(NSObject):
 
     @objc.python_method
     def _run_ocr(self):
+        shown = self.out_path_ocr.stringValue().strip() if hasattr(self, "out_path_ocr") else ""
+        if shown:
+            self.output_dir = Path(shown.replace("~", str(Path.home()), 1)).expanduser()
+            self.output_dir.mkdir(parents=True, exist_ok=True)
         self.is_running = True
         self.is_paused = False
         self.should_stop = False
@@ -871,6 +1070,39 @@ class Controller(NSObject):
         threading.Thread(target=self._ocr_thread, daemon=True).start()
 
     @objc.python_method
+    def _ocr_command_for_file(self, path, out):
+        ext = path.suffix.lower().lstrip(".")
+        if ext in AUDIO_EXTS or ext in VIDEO_EXTS:
+            return [TRANSCRIPT_CLI, str(path), "--output", str(out)], "transcript", None
+        if ext in {"pdf"} | IMAGE_EXTS:
+            engine = self.selected_ocr_engine
+            if engine == "mineru" and os.path.exists(MINERU_CLI):
+                tmp_dir = self.output_dir / f"_mineru_tmp_{path.stem}_{int(time.time())}"
+                return [MINERU_CLI, "-p", str(path), "-o", str(tmp_dir)], "mineru", tmp_dir
+            if engine == "legalocr-auto" and os.path.exists(LEGAL_OCR_CLI):
+                return [LEGAL_OCR_CLI, str(path), "--output", str(out), "--backend", "auto"], "legalocr-auto", None
+            if engine == "legalocr-mineru" and os.path.exists(LEGAL_OCR_CLI):
+                return [LEGAL_OCR_CLI, str(path), "--output", str(out), "--backend", "mineru"], "legalocr-mineru", None
+            if engine == "legalocr-paddle" and os.path.exists(LEGAL_OCR_CLI):
+                return [LEGAL_OCR_CLI, str(path), "--output", str(out), "--backend", "paddle", "--paddle-model", "PaddleOCR-VL-1.5"], "legalocr-paddle", None
+            return [CLI, str(path), "--output", str(out)], "visionocr", None
+        return [MARKDOWN_CLI, str(path), "-o", str(out)], "markitdown", None
+
+    @objc.python_method
+    def _finish_mineru_output(self, tmp_dir, out):
+        if not tmp_dir or not Path(tmp_dir).exists():
+            return False
+        try:
+            md_files = sorted(Path(tmp_dir).rglob("*.md"))
+            if md_files:
+                out.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(md_files[0]), str(out))
+                return True
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        return False
+
+    @objc.python_method
     def _ocr_thread(self):
         total = len(self.files)
         for idx, item in enumerate(self.files):
@@ -882,14 +1114,12 @@ class Controller(NSObject):
             ext = path.suffix.lower().lstrip(".")
             if ext in AUDIO_EXTS or ext in VIDEO_EXTS:
                 out = self.output_dir / f"{path.stem}_逐字稿.md"
-                cmd = [TRANSCRIPT_CLI, str(path), "--output", str(out)]
             elif ext in {"pdf"} | IMAGE_EXTS:
                 out = self.output_dir / f"{path.stem}.md"
-                cmd = [CLI, str(path), "--output", str(out)]
             else:
                 out = self.output_dir / f"{path.stem}.md"
-                cmd = [MARKDOWN_CLI, str(path), "-o", str(out)]
-            self.status_label.setStringValue_(f"处理中：{path.name}")
+            cmd, channel, tmp_dir = self._ocr_command_for_file(path, out)
+            self.status_label.setStringValue_(f"处理中：{path.name}（{channel}）")
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             base = idx / total
             while proc.poll() is None:
@@ -902,6 +1132,13 @@ class Controller(NSObject):
                 self.progress_bar.setValue_(bump)
                 self.pct_label.setStringValue_(f"{int(bump * 100)}%")
                 time.sleep(0.25)
+            if channel == "mineru":
+                if not self._finish_mineru_output(tmp_dir, out):
+                    self.status_label.setStringValue_(f"MinerU未生成结果，降级 VisionOCR：{path.name}")
+                    subprocess.run([CLI, str(path), "--output", str(out)], text=True, capture_output=True)
+            elif proc.returncode not in (0, None) and channel.startswith("legalocr"):
+                self.status_label.setStringValue_(f"{channel}失败，降级 VisionOCR：{path.name}")
+                subprocess.run([CLI, str(path), "--output", str(out)], text=True, capture_output=True)
             done = (idx + 1) / total
             self.progress_bar.setValue_(done)
             self.pct_label.setStringValue_(f"{int(done * 100)}%")
@@ -909,6 +1146,10 @@ class Controller(NSObject):
 
     @objc.python_method
     def _run_docx_files(self):
+        shown = self.out_path_docx.stringValue().strip() if hasattr(self, "out_path_docx") else ""
+        if shown:
+            self.output_dir = Path(shown.replace("~", str(Path.home()), 1)).expanduser()
+            self.output_dir.mkdir(parents=True, exist_ok=True)
         self.is_running = True
         self.is_paused = False
         self.should_stop = False
@@ -922,8 +1163,149 @@ class Controller(NSObject):
         threading.Thread(target=self._docx_files_thread, daemon=True).start()
 
     @objc.python_method
+    def _docx_value_number(self, popup, default):
+        if not popup:
+            return default
+        text = popup.titleOfSelectedItem() or ""
+        m = re.search(r"(\d+(?:\.\d+)?)", text)
+        return float(m.group(1)) if m else default
+
+    @objc.python_method
+    def _docx_indent_pt(self):
+        text = self.first_indent_popup.titleOfSelectedItem() if hasattr(self, "first_indent_popup") else ""
+        if "无" in text:
+            return 0
+        if "4" in text:
+            return 48
+        return 24
+
+    @objc.python_method
+    def _docx_margin_values(self):
+        text = self.margin_popup.titleOfSelectedItem() if hasattr(self, "margin_popup") else ""
+        if "窄" in text:
+            return 1.8, 1.8
+        if "宽" in text:
+            return 3.5, 3.5
+        return 3.18, 3.18
+
+    @objc.python_method
+    def _docx_page_values(self):
+        text = self.page_popup.titleOfSelectedItem() if hasattr(self, "page_popup") else ""
+        if "A3" in text:
+            return 29.7, 42.0
+        if "Letter" in text:
+            return 21.59, 27.94
+        return 21.0, 29.7
+
+    @objc.python_method
+    def _docx_font_pair(self):
+        preset = self.font_preset_popup.titleOfSelectedItem() if hasattr(self, "font_preset_popup") else ""
+        title_font = self.title_font_popup.titleOfSelectedItem() if hasattr(self, "title_font_popup") else "黑体"
+        body_font = self.body_font_popup.titleOfSelectedItem() if hasattr(self, "body_font_popup") else "仿宋"
+        if "法院" in preset:
+            return "黑体", "仿宋"
+        if "宋体" in preset:
+            return "黑体", "宋体"
+        if "屏幕" in preset:
+            return "微软雅黑", "微软雅黑"
+        return title_font, body_font
+
+    @objc.python_method
+    def _docx_config_path(self):
+        page_w, page_h = self._docx_page_values()
+        margin_l, margin_r = self._docx_margin_values()
+        title_font, body_font = self._docx_font_pair()
+        title_size = self._docx_value_number(self.title_size_popup, 15)
+        body_size = self._docx_value_number(self.body_size_popup, 12)
+        line_spacing = self._docx_value_number(self.line_spacing_popup, 1.5)
+        indent = self._docx_indent_pt()
+        content = f"""name: "GUI自定义法律文书格式"
+description: "由办案材料助手界面生成"
+page:
+  width: {page_w}
+  height: {page_h}
+  margin_top: 2.54
+  margin_bottom: 2.54
+  margin_left: {margin_l}
+  margin_right: {margin_r}
+fonts:
+  default:
+    name: "{body_font}"
+    name_alt: "{body_font}"
+    ascii: "Times New Roman"
+    size: {body_size}
+    color: "#000000"
+titles:
+  level1:
+    font: "{title_font}"
+    font_alt: "Times New Roman"
+    size: {title_size}
+    bold: true
+    align: "center"
+    space_before: 6
+    space_after: 6
+    indent: 0
+  level2:
+    font: "{title_font}"
+    font_alt: "Times New Roman"
+    size: {body_size}
+    bold: true
+    align: "justify"
+    indent: {indent}
+  level3:
+    font: "{title_font}"
+    font_alt: "Times New Roman"
+    size: {body_size}
+    bold: true
+    align: "justify"
+    indent: {indent}
+  level4:
+    font: "{title_font}"
+    font_alt: "Times New Roman"
+    size: {body_size}
+    bold: true
+    align: "justify"
+    indent: {indent}
+paragraph:
+  line_spacing: {line_spacing}
+  first_line_indent: {indent}
+  align: "justify"
+page_number:
+  enabled: true
+  format: "1/x"
+  font: "Times New Roman"
+  size: 10.5
+  position: "center"
+quotes:
+  convert_to_chinese: true
+table:
+  border_enabled: true
+  border_color: "#000000"
+  border_width: 4
+  line_spacing: 1.2
+image:
+  display_ratio: 1.0
+  max_width_cm: 14.64
+  target_dpi: 260
+horizontal_rule:
+  character: "─"
+  repeat_count: 55
+  font: "Times New Roman"
+  size: 12
+  color: "#808080"
+  alignment: "center"
+"""
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", encoding="utf-8", delete=False)
+        try:
+            tmp.write(content)
+            return tmp.name
+        finally:
+            tmp.close()
+
+    @objc.python_method
     def _docx_files_thread(self):
         total = len(self.files)
+        config_path = self._docx_config_path()
         for idx, item in enumerate(self.files):
             if self.should_stop:
                 break
@@ -932,7 +1314,7 @@ class Controller(NSObject):
             src = Path(item["path"])
             out = self.output_dir / f"{src.stem}.docx"
             self.status_label.setStringValue_(f"处理中：{src.name}")
-            subprocess.run([DOCX_CLI, str(src), "--type", self.selected_docx_type, "--output", str(out)], check=False)
+            subprocess.run([DOCX_CLI, str(src), "--type", self.selected_docx_type, "--config", config_path, "--output", str(out)], check=False)
             done = (idx + 1) / total
             self.progress_bar.setValue_(done)
             self.pct_label.setStringValue_(f"{int(done * 100)}%")
@@ -940,6 +1322,10 @@ class Controller(NSObject):
 
     @objc.python_method
     def _run_docx_text(self, text):
+        shown = self.out_path_docx.stringValue().strip() if hasattr(self, "out_path_docx") else ""
+        if shown:
+            self.output_dir = Path(shown.replace("~", str(Path.home()), 1)).expanduser()
+            self.output_dir.mkdir(parents=True, exist_ok=True)
         self.is_running = True
         self.is_paused = False
         self.should_stop = False
@@ -955,6 +1341,7 @@ class Controller(NSObject):
     @objc.python_method
     def _docx_text_thread(self, text):
         tmp_path = None
+        config_path = self._docx_config_path()
         try:
             with tempfile.NamedTemporaryFile(mode="w", suffix=".md", encoding="utf-8", delete=False) as tmp:
                 tmp.write(text)
@@ -963,7 +1350,7 @@ class Controller(NSObject):
             out = self.output_dir / name
             self.progress_bar.setValue_(0.3)
             self.pct_label.setStringValue_("30%")
-            subprocess.run([DOCX_CLI, tmp_path, "--type", self.selected_docx_type, "--output", str(out)], check=False)
+            subprocess.run([DOCX_CLI, tmp_path, "--type", self.selected_docx_type, "--config", config_path, "--output", str(out)], check=False)
             self.progress_bar.setValue_(1.0)
             self.pct_label.setStringValue_("100%")
         finally:
@@ -976,6 +1363,7 @@ class Controller(NSObject):
     def _build_wechat_page(self, body_h):
         _fill_view(self.wechat_page, C_APP_BG)
         left = NSView.alloc().initWithFrame_(NSMakeRect(20, 20, 320, body_h - 40))
+        _resize(left, FILL_HEIGHT | NSViewMaxXMargin)
         _set_view_style(left, C_WHITE, C_BORDER, 12)
         self.wechat_page.addSubview_(left)
 
@@ -996,57 +1384,73 @@ class Controller(NSObject):
         self.wechat_capture_level.selectItemAtIndex_(2)
         left.addSubview_(self.wechat_capture_level)
 
-        left.addSubview_(_label("输出质量", 18, left.bounds().size.height - 220, 120, 18, size=12, color=C_DIM))
-        self.wechat_quality = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 252, 284, 28), False)
+        left.addSubview_(_label("选帧方式", 18, left.bounds().size.height - 220, 120, 18, size=12, color=C_DIM))
+        self.wechat_stride_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 252, 284, 28), False)
+        for opt in ["自动判断滚动速度", "每 8 张留 1 张", "每 10 张留 1 张", "每 15 张留 1 张", "每 20 张留 1 张", "智能去重（旧逻辑）"]:
+            self.wechat_stride_popup.addItemWithTitle_(opt)
+        self.wechat_stride_popup.setTarget_(self)
+        self.wechat_stride_popup.setAction_("wechatStrideChanged:")
+        left.addSubview_(self.wechat_stride_popup)
+
+        left.addSubview_(_label("输出质量", 18, left.bounds().size.height - 294, 120, 18, size=12, color=C_DIM))
+        self.wechat_quality = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 326, 284, 28), False)
         for opt in ["清晰", "平衡", "体积"]:
             self.wechat_quality.addItemWithTitle_(opt)
         self.wechat_quality.selectItemAtIndex_(0)
         left.addSubview_(self.wechat_quality)
 
-        left.addSubview_(_label("选项", 18, left.bounds().size.height - 294, 120, 18, size=12, color=C_DIM))
-        self.wechat_keep_raw = _checkbox("保留原始帧", 18, left.bounds().size.height - 322, 130, 22, True)
-        self.wechat_context_overlap = _checkbox("相邻页少量重复", 160, left.bounds().size.height - 322, 142, 22, True)
-        self.wechat_local_ocr = _checkbox("本地OCR优先", 18, left.bounds().size.height - 352, 130, 22, True)
-        self.wechat_candidate_ocr = _checkbox("候选页OCR", 160, left.bounds().size.height - 352, 130, 22, False)
-        self.wechat_cloud_ocr = _checkbox("手动云端整理", 18, left.bounds().size.height - 384, 140, 22, False)
+        left.addSubview_(_label("选项", 18, left.bounds().size.height - 368, 120, 18, size=12, color=C_DIM))
+        self.wechat_keep_raw = _checkbox("保留原始帧", 18, left.bounds().size.height - 396, 130, 22, True)
+        self.wechat_context_overlap = _checkbox("相邻页少量重复", 160, left.bounds().size.height - 396, 142, 22, True)
+        self.wechat_local_ocr = _checkbox("本地OCR优先", 18, left.bounds().size.height - 426, 130, 22, True)
+        self.wechat_candidate_ocr = _checkbox("候选页OCR", 160, left.bounds().size.height - 426, 130, 22, False)
+        self.wechat_cloud_ocr = _checkbox("手动云端整理", 18, left.bounds().size.height - 458, 140, 22, False)
         left.addSubview_(self.wechat_keep_raw)
         left.addSubview_(self.wechat_context_overlap)
         left.addSubview_(self.wechat_local_ocr)
         left.addSubview_(self.wechat_candidate_ocr)
         left.addSubview_(self.wechat_cloud_ocr)
-        left.addSubview_(_btn("云端设置", 176, left.bounds().size.height - 384, 126, 26, self, "configureWeChatCloud:"))
+        left.addSubview_(_btn("云端设置", 176, left.bounds().size.height - 458, 126, 26, self, "configureWeChatCloud:"))
 
-        left.addSubview_(_label("输出目录", 18, left.bounds().size.height - 424, 100, 18, size=12, color=C_DIM))
-        self.out_path_wechat = _input_field(18, left.bounds().size.height - 452, 252, 28)
+        left.addSubview_(_label("输出目录", 18, left.bounds().size.height - 498, 100, 18, size=12, color=C_DIM))
+        self.out_path_wechat = _input_field(18, left.bounds().size.height - 526, 252, 28)
         self.out_path_wechat.setStringValue_(str(self.wechat_output_dir).replace(str(Path.home()), "~"))
         left.addSubview_(self.out_path_wechat)
-        self.btn_out_wechat = _btn("📁", 274, left.bounds().size.height - 452, 28, 28, self, "pickOutputDir:")
+        self.btn_out_wechat = _btn("📁", 274, left.bounds().size.height - 526, 28, 28, self, "pickOutputDir:")
         left.addSubview_(self.btn_out_wechat)
 
         self.btn_start_left_wechat = _btn("导出取证材料", 18, 14, 284, 34, self, "startProcessing:")
+        _resize(self.btn_start_left_wechat, PIN_BOTTOM)
         left.addSubview_(self.btn_start_left_wechat)
         _set_view_style(self.btn_start_left_wechat, C_PANEL_BG, C_BORDER, 8)
         self.btn_start_left_wechat.setContentTintColor_(C_TEXT_STRONG)
+        _pin_panel_controls_to_top(left, (self.btn_start_left_wechat,))
 
         right = NSView.alloc().initWithFrame_(NSMakeRect(356, 20, self.wechat_page.bounds().size.width - 376, body_h - 40))
+        _resize(right, FILL_WIDTH | FILL_HEIGHT)
         self.wechat_page.addSubview_(right)
 
         self.wechat_drop = DropZone.alloc().initWithFrame_controller_(NSMakeRect(0, right.bounds().size.height - 230, right.bounds().size.width, 230), self)
+        _resize(self.wechat_drop, FILL_WIDTH | PIN_TOP)
         right.addSubview_(self.wechat_drop)
-        self.wechat_drop.addSubview_(_label("拖入聊天录屏", right.bounds().size.width / 2 - 100, 132, 200, 30, size=17, weight=0.75, color=C_TEXT_STRONG))
-        self.wechat_drop.addSubview_(_label("MP4 / MOV / M4V，可批量处理", right.bounds().size.width / 2 - 150, 102, 300, 22, size=13, color=C_DIM, align=2))
+        wechat_title = _label("拖入聊天录屏", right.bounds().size.width / 2 - 100, 132, 200, 30, size=17, weight=0.75, color=C_TEXT_STRONG, align=2)
+        wechat_subtitle = _label("MP4 / MOV / M4V，可批量处理", right.bounds().size.width / 2 - 150, 102, 300, 22, size=13, color=C_DIM, align=2)
+        self.wechat_drop.addSubview_(_register_file_drag(_center_in_parent(wechat_title)))
+        self.wechat_drop.addSubview_(_register_file_drag(_center_in_parent(wechat_subtitle)))
         self.btn_pick_wechat = _btn("选择录屏", right.bounds().size.width / 2 - 48, 72, 96, 32, self, "selectFiles:")
-        self.wechat_drop.addSubview_(self.btn_pick_wechat)
+        self.wechat_drop.addSubview_(_register_file_drag(_center_in_parent(self.btn_pick_wechat)))
         _set_view_style(self.btn_pick_wechat, C_WHITE, C_BORDER, 8)
         self.btn_pick_wechat.setContentTintColor_(C_TEXT_STRONG)
 
         self.wechat_hint = _label("快速初稿本地处理；OCR增强默认仅在本机生成文字索引，只有勾选云端整理才发送文字摘要。", 0, right.bounds().size.height - 292, right.bounds().size.width, 22, size=12, color=C_DIM)
+        _resize(self.wechat_hint, FILL_WIDTH | PIN_TOP)
         right.addSubview_(self.wechat_hint)
 
         self.wechat_task_text = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, right.bounds().size.width, right.bounds().size.height - 320))
         self.wechat_task_text.setEditable_(False)
         self.wechat_task_text.setFont_(_font(12))
         scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, right.bounds().size.width, right.bounds().size.height - 320))
+        _resize(scroll, FILL_WIDTH | FILL_HEIGHT)
         scroll.setDocumentView_(self.wechat_task_text)
         scroll.setHasVerticalScroller_(True)
         _set_view_style(scroll, C_WHITE, C_BORDER, 10)
@@ -1056,6 +1460,18 @@ class Controller(NSObject):
     def wechatModeChanged_(self, sender):
         idx = sender.indexOfSelectedItem() if sender.respondsToSelector_("indexOfSelectedItem") else sender.selectedSegment()
         self.wechat_mode = "ocr" if idx == 1 else "quick"
+
+    @IBAction
+    def wechatStrideChanged_(self, sender):
+        stride_map = {
+            "自动判断滚动速度": "auto",
+            "每 8 张留 1 张": "8",
+            "每 10 张留 1 张": "10",
+            "每 15 张留 1 张": "15",
+            "每 20 张留 1 张": "20",
+            "智能去重（旧逻辑）": "legacy",
+        }
+        self.selected_wechat_stride = stride_map.get(sender.titleOfSelectedItem(), "auto")
 
     @objc.python_method
     def _control_index(self, control):
@@ -1122,6 +1538,9 @@ class Controller(NSObject):
             "--interval", interval,
             "--pdf-jpeg-quality", pdf_quality,
         ]
+        if self.selected_wechat_stride != "legacy":
+            args += ["--stride-frames", self.selected_wechat_stride]
+            label += " / 自动步长" if self.selected_wechat_stride == "auto" else f" / 每{self.selected_wechat_stride}帧"
         if max_width:
             args += ["--max-width", max_width]
         if not bool(self.wechat_keep_raw.state()):

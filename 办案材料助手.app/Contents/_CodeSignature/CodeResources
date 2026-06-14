@@ -22,11 +22,15 @@
 		</data>
 		<key>Resources/vision-ocr-gui-native.py</key>
 		<data>
-		BHAE29CToDEtGbmmbA9HvPxPtnU=
+		BfxPAntkTOxifUXcNsVh24Sq40A=
 		</data>
 		<key>Resources/vision_ocr_utils.py</key>
 		<data>
 		Tb3OaA73FaN/+TaKdtNAnPXmAYA=
+		</data>
+		<key>Resources/wechat_evidence.py</key>
+		<data>
+		BFUiEXimFPFzS2xIc+UhCLTpQ5Y=
 		</data>
 		<key>Resources/使用说明.md</key>
 		<data>
@@ -94,7 +98,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			8zI1Z4R9WosKJQAe1EeYsZC/IgrHbQr2Psv3gQ0+K0M=
+			gj1pG69gaOOxdCqADSfNYKfEhlLTgrqMqHVFn2A6VQ0=
 			</data>
 		</dict>
 		<key>Resources/vision_ocr_utils.py</key>
@@ -102,6 +106,13 @@
 			<key>hash2</key>
 			<data>
 			vP3nPf23Vu/irjh7p3ZYWuDC5dAAQSccuinMqJnobPg=
+			</data>
+		</dict>
+		<key>Resources/wechat_evidence.py</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			SbEbmaCv6Nz21KlGZySWC157X4lYh8NbdpSfspxc318=
 			</data>
 		</dict>
 		<key>Resources/使用说明.md</key>
