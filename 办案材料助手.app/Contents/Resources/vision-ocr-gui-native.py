@@ -1157,6 +1157,58 @@ class Controller(NSObject):
             return ""
 
     @objc.python_method
+    def _wechat_ocr_paths(self, source_dir):
+        source_dir = Path(source_dir)
+        return {
+            "index": source_dir / "复核资料" / "OCR文字索引.jsonl",
+            "markdown": source_dir / "录屏取证初稿_OCR文字索引.md",
+            "report": source_dir / "聊天记录分析报告.md",
+        }
+
+    @objc.python_method
+    def _looks_like_wechat_export_dir(self, source_dir):
+        source_dir = Path(source_dir)
+        return (
+            (source_dir / "复核资料" / "截图索引.jsonl").exists()
+            and (source_dir / "截图").exists()
+            and any(source_dir.glob("录屏取证*.pdf"))
+        )
+
+    @objc.python_method
+    def _ensure_wechat_ocr_for_evidence(self, source_dir):
+        source_dir = Path(source_dir)
+        if not self._looks_like_wechat_export_dir(source_dir):
+            return ""
+        paths = self._wechat_ocr_paths(source_dir)
+        if paths["index"].exists() and paths["markdown"].exists() and paths["report"].exists():
+            return ""
+        self.status_label.setStringValue_("正在对取证PDF截图做全量 OCR...")
+        cmd = [sys.executable, str(WECHAT_CLI), "ocr-index", str(source_dir), "--scope", "selected", "--jobs", "2"]
+        proc = subprocess.run(cmd, text=True, capture_output=True)
+        if proc.returncode != 0:
+            return (proc.stderr or proc.stdout or "录屏取证 OCR 失败").strip()[:500]
+        missing = [path.name for path in paths.values() if not path.exists()]
+        if missing:
+            return "录屏取证 OCR 未完整生成：" + "、".join(missing)
+        return "已完成取证PDF截图全量 OCR"
+
+    @objc.python_method
+    def _copy_supporting_evidence_texts(self, evidence_dir, materials):
+        copied = []
+        wanted_names = {"录屏取证初稿_OCR文字索引.md", "聊天记录分析报告.md"}
+        for item in materials:
+            src = Path(item["path"])
+            if src.name not in wanted_names or not src.exists():
+                continue
+            dst = Path(evidence_dir) / src.name
+            try:
+                shutil.copy2(src, dst)
+                copied.append(dst)
+            except Exception:
+                pass
+        return copied
+
+    @objc.python_method
     def _ensure_pdf_markdown_for_evidence(self, source_dir, evidence_dir, materials):
         has_text = any(item["suffix"].lstrip(".") in EVIDENCE_TEXT_EXTS for item in materials)
         pdfs = [Path(item["path"]) for item in materials if item["suffix"] == ".pdf"]
@@ -1325,7 +1377,8 @@ class Controller(NSObject):
             },
         }
         intake_path.write_text(json.dumps(intake, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        return summary_path, timeline_path, manifest_path, intake_path
+        copied = self._copy_supporting_evidence_texts(evidence_dir, materials)
+        return (summary_path, timeline_path, *copied, manifest_path, intake_path)
 
     @objc.python_method
     def _evidence_thread(self, source_dir):
@@ -1335,10 +1388,12 @@ class Controller(NSObject):
         try:
             self.progress_bar.setValue_(0.15)
             self.pct_label.setStringValue_("15%")
+            ocr_note = self._ensure_wechat_ocr_for_evidence(source_dir)
             materials = self._scan_evidence_materials(source_dir)
             self.progress_bar.setValue_(0.35)
             self.pct_label.setStringValue_("35%")
             materials, conversion_note = self._ensure_pdf_markdown_for_evidence(source_dir, evidence_dir, materials)
+            conversion_note = "；".join(note for note in (ocr_note, conversion_note) if note)
             if not materials:
                 self.status_label.setStringValue_("未找到可整理的 Markdown、PDF 或 OCR 索引")
                 self._alert("没有可整理的材料", f"当前目录中没有找到 Markdown、PDF 或 OCR 索引：\n{source_dir}")
@@ -1469,6 +1524,9 @@ class Controller(NSObject):
         if ext in AUDIO_EXTS or ext in VIDEO_EXTS:
             return [TRANSCRIPT_CLI, str(path), "--output", str(out)], "transcript", None
         if ext in {"pdf"} | IMAGE_EXTS:
+            wechat_export_dir = self._wechat_export_dir_for_pdf(path)
+            if wechat_export_dir and WECHAT_CLI.exists():
+                return [sys.executable, str(WECHAT_CLI), "ocr-index", str(wechat_export_dir), "--scope", "selected", "--jobs", "2"], "wechat-ocr", wechat_export_dir
             engine = self.selected_ocr_engine
             if engine == "mineru" and os.path.exists(MINERU_CLI):
                 tmp_dir = self.output_dir / f"_mineru_tmp_{path.stem}_{int(time.time())}"
@@ -1481,6 +1539,16 @@ class Controller(NSObject):
                 return [LEGAL_OCR_CLI, str(path), "--output", str(out), "--backend", "paddle", "--paddle-model", "PaddleOCR-VL-1.5"], "legalocr-paddle", None
             return [CLI, str(path), "--output", str(out)], "visionocr", None
         return [MARKDOWN_CLI, str(path), "-o", str(out)], "markitdown", None
+
+    @objc.python_method
+    def _wechat_export_dir_for_pdf(self, path):
+        path = Path(path)
+        if path.suffix.lower() != ".pdf" or "录屏取证" not in path.name:
+            return None
+        parent = path.parent
+        if self._looks_like_wechat_export_dir(parent):
+            return parent
+        return None
 
     @objc.python_method
     def _finish_mineru_output(self, tmp_dir, out):
@@ -1526,7 +1594,17 @@ class Controller(NSObject):
                 self.progress_bar.setValue_(bump)
                 self.pct_label.setStringValue_(f"{int(bump * 100)}%")
                 time.sleep(0.25)
-            if channel == "mineru":
+            if channel == "wechat-ocr":
+                md = Path(tmp_dir) / "录屏取证初稿_OCR文字索引.md" if tmp_dir else None
+                report = Path(tmp_dir) / "聊天记录分析报告.md" if tmp_dir else None
+                if proc.returncode == 0 and md and md.exists():
+                    shutil.copy2(md, out)
+                    if report and report.exists():
+                        shutil.copy2(report, self.output_dir / report.name)
+                else:
+                    self.status_label.setStringValue_(f"取证OCR未生成结果，降级 VisionOCR：{path.name}")
+                    subprocess.run([CLI, str(path), "--output", str(out), "--type", "wechat", "--layout", "plain", "--recognition-level", "accurate", "--engine", "ocr"], text=True, capture_output=True)
+            elif channel == "mineru":
                 if not self._finish_mineru_output(tmp_dir, out):
                     self.status_label.setStringValue_(f"MinerU未生成结果，降级 VisionOCR：{path.name}")
                     subprocess.run([CLI, str(path), "--output", str(out)], text=True, capture_output=True)
@@ -1811,43 +1889,43 @@ horizontal_rule:
         self.wechat_quality.selectItemAtIndex_(0)
         left.addSubview_(self.wechat_quality)
 
-        left.addSubview_(_label("选项", 18, left.bounds().size.height - 326, 120, 18, size=12, color=C_DIM))
-        self.wechat_keep_raw = _checkbox("保留原始缓存", 18, left.bounds().size.height - 352, 130, 22, True)
-        self.wechat_context_overlap = _checkbox("相邻页少量重复", 160, left.bounds().size.height - 352, 142, 22, True)
-        self.wechat_local_ocr = _checkbox("本地OCR优先", 18, left.bounds().size.height - 380, 130, 22, True)
-        self.wechat_candidate_ocr = _checkbox("候选页OCR", 160, left.bounds().size.height - 380, 130, 22, False)
-        self.wechat_cloud_ocr = _checkbox("手动云端整理", 18, left.bounds().size.height - 408, 140, 22, False)
-        self.wechat_preserve_head = _checkbox("开头详情页加密", 160, left.bounds().size.height - 408, 142, 22, False)
+        left.addSubview_(_label("选项", 18, 228, 120, 18, size=12, color=C_DIM))
+        self.wechat_keep_raw = _checkbox("保留原始缓存", 18, 202, 130, 22, True)
+        self.wechat_context_overlap = _checkbox("相邻页少量重复", 160, 202, 142, 22, True)
+        self.wechat_local_ocr = _checkbox("本地OCR优先", 18, 176, 130, 22, True)
+        self.wechat_candidate_ocr = _checkbox("候选页OCR", 160, 176, 130, 22, False)
+        self.wechat_cloud_ocr = _checkbox("手动云端整理", 18, 150, 140, 22, False)
+        self.wechat_preserve_head = _checkbox("开头详情页加密", 160, 150, 142, 22, False)
         left.addSubview_(self.wechat_keep_raw)
         left.addSubview_(self.wechat_context_overlap)
         left.addSubview_(self.wechat_local_ocr)
         left.addSubview_(self.wechat_candidate_ocr)
         left.addSubview_(self.wechat_cloud_ocr)
         left.addSubview_(self.wechat_preserve_head)
-        left.addSubview_(_btn("云端设置", 176, left.bounds().size.height - 436, 126, 26, self, "configureWeChatCloud:"))
+        left.addSubview_(_btn("云端设置", 176, 224, 126, 26, self, "configureWeChatCloud:"))
 
-        left.addSubview_(_label("输出目录", 18, left.bounds().size.height - 470, 100, 18, size=12, color=C_DIM))
-        self.out_path_wechat = _input_field(18, left.bounds().size.height - 498, 252, 28)
+        left.addSubview_(_label("输出目录", 18, 126, 100, 18, size=12, color=C_DIM))
+        self.out_path_wechat = _input_field(18, 96, 252, 28)
         self.out_path_wechat.setStringValue_(str(self.wechat_output_dir).replace(str(Path.home()), "~"))
         left.addSubview_(self.out_path_wechat)
-        self.btn_out_wechat = _btn("📁", 274, left.bounds().size.height - 498, 28, 28, self, "pickOutputDir:")
+        self.btn_out_wechat = _btn("📁", 274, 96, 28, 28, self, "pickOutputDir:")
         left.addSubview_(self.btn_out_wechat)
 
-        self.btn_start_left_wechat = _btn("导出取证材料", 18, 88, 284, 30, self, "startProcessing:")
+        self.btn_start_left_wechat = _btn("导出取证材料", 18, 64, 284, 26, self, "startProcessing:")
         _resize(self.btn_start_left_wechat, PIN_BOTTOM)
         left.addSubview_(self.btn_start_left_wechat)
         _set_view_style(self.btn_start_left_wechat, C_PANEL_BG, C_BORDER, 8)
         self.btn_start_left_wechat.setContentTintColor_(C_TEXT_STRONG)
-        self.btn_evidence_left_wechat = _btn("证据整理", 18, 52, 284, 30, self, "organizeEvidence:")
-        _resize(self.btn_evidence_left_wechat, PIN_BOTTOM)
-        left.addSubview_(self.btn_evidence_left_wechat)
-        _set_view_style(self.btn_evidence_left_wechat, C_WHITE, C_BORDER, 8)
-        self.btn_evidence_left_wechat.setContentTintColor_(C_TEXT_STRONG)
-        self.btn_rerun_left_wechat = _btn("重新导出（复用截图）", 18, 14, 284, 30, self, "rerunWeChatExport:")
+        self.btn_rerun_left_wechat = _btn("重新导出（复用截图）", 18, 34, 284, 26, self, "rerunWeChatExport:")
         _resize(self.btn_rerun_left_wechat, PIN_BOTTOM)
         left.addSubview_(self.btn_rerun_left_wechat)
         _set_view_style(self.btn_rerun_left_wechat, C_WHITE, C_BORDER, 8)
         self.btn_rerun_left_wechat.setContentTintColor_(C_TEXT_STRONG)
+        self.btn_evidence_left_wechat = _btn("证据整理", 18, 4, 284, 26, self, "organizeEvidence:")
+        _resize(self.btn_evidence_left_wechat, PIN_BOTTOM)
+        left.addSubview_(self.btn_evidence_left_wechat)
+        _set_view_style(self.btn_evidence_left_wechat, C_WHITE, C_BORDER, 8)
+        self.btn_evidence_left_wechat.setContentTintColor_(C_TEXT_STRONG)
         _pin_panel_controls_to_top(left, (self.btn_start_left_wechat, self.btn_evidence_left_wechat, self.btn_rerun_left_wechat))
 
         right = NSView.alloc().initWithFrame_(NSMakeRect(356, 20, self.wechat_page.bounds().size.width - 376, body_h - 40))
