@@ -325,6 +325,7 @@ class Controller(NSObject):
         self.wechat_cloud_base_url = WECHAT_DEFAULT_CLOUD_BASE_URL
         self.wechat_cloud_model = WECHAT_DEFAULT_CLOUD_MODEL
         self.wechat_reuse_raw_only = False
+        self.active_child_proc = None
         self.last_evidence_dir = None
         self.current_accent = C_TEXT_STRONG
         self.current_soft_accent = C_PANEL_BG
@@ -772,10 +773,30 @@ class Controller(NSObject):
 
     @objc.python_method
     def _alert(self, title, message):
+        if threading.current_thread() is not threading.main_thread():
+            AppHelper.callAfter(self._alert, title, message)
+            return
         alert = NSAlert.alloc().init()
         alert.setMessageText_(title)
         alert.setInformativeText_(message)
         alert.runModal()
+
+    @objc.python_method
+    def _call_on_main(self, func, *args):
+        if threading.current_thread() is threading.main_thread():
+            func(*args)
+        else:
+            AppHelper.callAfter(func, *args)
+
+    @objc.python_method
+    def _set_control_text(self, control, text):
+        self._call_on_main(control.setStringValue_, str(text))
+
+    @objc.python_method
+    def _set_progress(self, value, pct_text=None):
+        self._call_on_main(self.progress_bar.setValue_, value)
+        if pct_text is not None:
+            self._set_control_text(self.pct_label, pct_text)
 
     @IBAction
     def switchToOCR_(self, _sender):
@@ -908,6 +929,12 @@ class Controller(NSObject):
     @IBAction
     def stopProcessing_(self, _sender):
         self.should_stop = True
+        proc = self.active_child_proc
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
         self.status_label.setStringValue_("已请求停止（当前文件后）")
 
 
@@ -1497,7 +1524,7 @@ class Controller(NSObject):
             if self._start_time:
                 elapsed = int(time.time() - self._start_time - paused_time)
                 m, s = divmod(max(elapsed, 0), 60)
-                self.timer_label.setStringValue_(f"{m:02d}:{s:02d}")
+                self._set_control_text(self.timer_label, f"{m:02d}:{s:02d}")
             time.sleep(0.3)
 
     @objc.python_method
@@ -2188,7 +2215,7 @@ horizontal_rule:
             display_stride_label = f"{stride_label} / 缓存{cache_interval:g}秒"
             raw_cache_dir = self._wechat_video_cache_dir(path, cache_interval)
             action_label = "重新导出" if self.wechat_reuse_raw_only else "导出"
-            self.status_label.setStringValue_(f"正在{action_label}：{path.name}（{profile_label} / {version_label}）")
+            self._set_control_text(self.status_label, f"正在{action_label}：{path.name}（{profile_label} / {version_label}）")
             cmd = [
                 sys.executable, str(WECHAT_CLI), "interval-pdf", str(path),
                 "--out-dir", str(export_dir),
@@ -2198,6 +2225,7 @@ horizontal_rule:
             if self.wechat_reuse_raw_only:
                 cmd.append("--reuse-raw-only")
             proc = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.active_child_proc = proc
             while proc.poll() is None:
                 if self.should_stop:
                     proc.terminate()
@@ -2207,6 +2235,7 @@ horizontal_rule:
                         proc.kill()
                     break
                 time.sleep(0.3)
+            self.active_child_proc = None
             stdout_text = proc.stdout.read() if proc.stdout else ""
             export_dir = None
             pdfs = []
@@ -2232,25 +2261,23 @@ horizontal_rule:
                 failures.append(f"{path.name}: {msg[:80]}")
                 rows.append(f"{path.name}\t失败\t{display_stride_label}\t{msg[:80]}")
             self.wechat_last_rows = rows[:]
-            self.wechat_task_text.setString_("\n".join(rows))
+            self._call_on_main(self.wechat_task_text.setString_, "\n".join(rows))
             done = idx / total
-            self.progress_bar.setValue_(done * 0.82)
-            self.pct_label.setStringValue_(f"{int(done * 82)}%")
+            self._set_progress(done * 0.82, f"{int(done * 82)}%")
 
         if self.wechat_mode == "ocr" and generated_dirs and bool(self.wechat_local_ocr.state()):
-            self.status_label.setStringValue_("正在生成本地 OCR 文字索引...")
+            self._set_control_text(self.status_label, "正在生成本地 OCR 文字索引...")
             notes.extend(self._run_wechat_local_ocr(generated_dirs))
-            self.progress_bar.setValue_(0.92)
-            self.pct_label.setStringValue_("92%")
+            self._set_progress(0.92, "92%")
 
         if failures:
-            self.status_label.setStringValue_(f"完成 {ok_count}/{total}，有失败项")
+            self._set_control_text(self.status_label, f"完成 {ok_count}/{total}，有失败项")
             self._alert("部分视频导出失败", "\n".join(failures[:3]))
         elif notes:
-            self.status_label.setStringValue_(f"导出完成：{ok_count} 个视频；{notes[0]}")
+            self._set_control_text(self.status_label, f"导出完成：{ok_count} 个视频；{notes[0]}")
             self._alert("导出完成", "\n".join(notes[:4]))
         else:
-            self.status_label.setStringValue_(f"导出完成：{ok_count} 个视频")
+            self._set_control_text(self.status_label, f"导出完成：{ok_count} 个视频")
         self._finish_run()
 
     @objc.python_method
@@ -2299,8 +2326,12 @@ horizontal_rule:
 
     @objc.python_method
     def _finish_run(self):
+        if threading.current_thread() is not threading.main_thread():
+            AppHelper.callAfter(self._finish_run)
+            return
         self._timer_stop = True
         self.is_running = False
+        self.active_child_proc = None
         self._set_running_ui(False)
         self.wechat_reuse_raw_only = False
         if self.should_stop:
