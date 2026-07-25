@@ -22,7 +22,7 @@ BAOYU_DIR = Path(
 )
 BAOYU_MAIN = BAOYU_DIR / "scripts" / "main.ts"
 
-QUALITY_LADDER = [80, 70, 60, 50, 40]
+QUALITY_LADDER = [85, 75, 65, 55, 45, 35]
 FORMAT_OPTIONS = ("webp", "jpeg", "png")
 
 PRESET_SOCIAL = "social"
