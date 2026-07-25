@@ -91,6 +91,29 @@ WECHAT_KEYCHAIN_SERVICE = "wechat-evidence-cloud"
 WECHAT_DEFAULT_CLOUD_BASE_URL = "https://api.deepseek.com"
 WECHAT_DEFAULT_CLOUD_MODEL = "deepseek-chat"
 
+_IMAGE_COMPRESS_DIR = Path(__file__).resolve().parent
+if str(_IMAGE_COMPRESS_DIR) not in sys.path:
+    sys.path.insert(0, str(_IMAGE_COMPRESS_DIR))
+try:
+    import image_compress as _imgc
+except Exception:
+    _imgc = None
+
+IMAGE_COMPRESS_OUTPUT_DIR = Path.home() / "Desktop" / "图片压缩输出"
+IMAGE_COMPRESS_BUN = shutil.which("bun") or "/Users/Apple/.bun/bin/bun"
+IMAGE_COMPRESS_BAOYU_DIR = "/Users/Apple/.shared-skills/baoyu-compress-image"
+IMAGE_COMPRESS_PRESET_LABELS = [
+    "朋友圈高画质（不限大小）",
+    "证件/合规文件（按目标 KB 压）",
+    "自定义（全部手填）",
+]
+IMAGE_COMPRESS_PRESET_KEYS = ["social", "id", "custom"]
+IMAGE_COMPRESS_FMT_LABELS = ["WebP（推荐）", "JPEG", "PNG（不压缩）"]
+IMAGE_COMPRESS_FMT_KEYS = ["webp", "jpeg", "png"]
+IMAGE_COMPRESS_Q_LABELS = ["极清（90）", "高（80）", "中（70）", "低（60）"]
+IMAGE_COMPRESS_Q_VALUES = [90, 80, 70, 60]
+IMAGE_COMPRESS_DEFAULT_TARGET_KB = 200
+
 
 AUDIO_EXTS = {"mp3", "wav", "m4a", "aac", "flac", "ogg", "wma"}
 VIDEO_EXTS = {"mp4", "m4v", "mov", "avi", "mkv", "webm", "flv"}
@@ -327,6 +350,16 @@ class Controller(NSObject):
         self.wechat_reuse_raw_only = False
         self.active_child_proc = None
         self.last_evidence_dir = None
+        self.compress_files = []
+        self.compress_results = {}
+        self.compress_last_run = None
+        self.compress_output_dir = IMAGE_COMPRESS_OUTPUT_DIR
+        self.compress_preset_idx = 0
+        self.compress_fmt_idx = 0
+        self.compress_q_idx = 0
+        self.compress_target_kb = IMAGE_COMPRESS_DEFAULT_TARGET_KB
+        self.compress_keep_original = True
+        self.compress_strip_metadata = True
         self.current_accent = C_TEXT_STRONG
         self.current_soft_accent = C_PANEL_BG
         self.output_dir = Path.home() / "Desktop" / "VisionOCR_Output"
@@ -369,14 +402,17 @@ class Controller(NSObject):
         self.nav_ocr = _nav_btn("▣ 材料转 MD", 250, 20, 118, 34, self, "switchToOCR:")
         self.nav_docx = _nav_btn("▤ 转 Word", 390, 20, 108, 34, self, "switchToDOCX:")
         self.nav_wechat = _nav_btn("◉ 录屏取证", 520, 20, 116, 34, self, "switchToWeChat:")
+        self.nav_compress = _nav_btn("◆ 图片压缩", 660, 20, 116, 34, self, "switchToCompress:")
         self.sidebar.addSubview_(self.nav_ocr)
         self.sidebar.addSubview_(self.nav_docx)
         self.sidebar.addSubview_(self.nav_wechat)
+        self.sidebar.addSubview_(self.nav_compress)
 
         self.nav_ocr_bar = NSView.alloc().initWithFrame_(NSMakeRect(260, 0, 98, 3))
         self.nav_docx_bar = NSView.alloc().initWithFrame_(NSMakeRect(404, 0, 78, 3))
         self.nav_wechat_bar = NSView.alloc().initWithFrame_(NSMakeRect(534, 0, 84, 3))
-        for bar in (self.nav_ocr_bar, self.nav_docx_bar, self.nav_wechat_bar):
+        self.nav_compress_bar = NSView.alloc().initWithFrame_(NSMakeRect(670, 0, 96, 3))
+        for bar in (self.nav_ocr_bar, self.nav_docx_bar, self.nav_wechat_bar, self.nav_compress_bar):
             _fill_view(bar, C_TEXT_STRONG)
             self.sidebar.addSubview_(bar)
 
@@ -443,6 +479,11 @@ class Controller(NSObject):
         self._build_wechat_page(body_h)
         self.wechat_page.setHidden_(True)
         self.docx_page.setHidden_(True)
+        self.compress_page = NSView.alloc().initWithFrame_(NSMakeRect(0, bottom_h, width, body_h))
+        _resize(self.compress_page, FILL_WIDTH | FILL_HEIGHT)
+        self.main.addSubview_(self.compress_page)
+        self._build_compress_page(body_h)
+        self.compress_page.setHidden_(True)
 
         win.makeKeyAndOrderFront_(None)
 
@@ -696,6 +737,12 @@ class Controller(NSObject):
             title = "录屏取证"
             subtitle = "将聊天录屏导出为可复核截图 PDF 和文字索引"
             start_title = "导出取证材料"
+        elif self.mode == "compress":
+            accent = C_TEXT_STRONG
+            soft = C_PANEL_BG
+            title = "图片压缩"
+            subtitle = "朋友圈高画质 / 证件压到指定大小 / 自定义"
+            start_title = "开始压缩"
         else:
             accent = C_TEXT_STRONG
             soft = C_PANEL_BG
@@ -718,12 +765,22 @@ class Controller(NSObject):
         _set_view_style(self.nav_ocr, C_WHITE if self.mode == "ocr" else C_HEADER_BG, C_BORDER if self.mode == "ocr" else C_HEADER_BG, 8)
         _set_view_style(self.nav_docx, C_WHITE if self.mode == "docx" else C_HEADER_BG, C_BORDER if self.mode == "docx" else C_HEADER_BG, 8)
         _set_view_style(self.nav_wechat, C_WHITE if self.mode == "wechat" else C_HEADER_BG, C_BORDER if self.mode == "wechat" else C_HEADER_BG, 8)
+        _set_view_style(self.nav_compress, C_WHITE if self.mode == "compress" else C_HEADER_BG, C_BORDER if self.mode == "compress" else C_HEADER_BG, 8)
         self.nav_ocr.setContentTintColor_(C_TEXT_STRONG if self.mode == "ocr" else C_DIM)
         self.nav_docx.setContentTintColor_(C_TEXT_STRONG if self.mode == "docx" else C_DIM)
         self.nav_wechat.setContentTintColor_(C_TEXT_STRONG if self.mode == "wechat" else C_DIM)
         self.nav_ocr_bar.setHidden_(self.mode != "ocr")
         self.nav_docx_bar.setHidden_(self.mode != "docx")
         self.nav_wechat_bar.setHidden_(self.mode != "wechat")
+        self.nav_compress.setContentTintColor_(C_TEXT_STRONG if self.mode == "compress" else C_DIM)
+        self.nav_ocr_bar.setHidden_(self.mode != "ocr")
+        self.nav_docx_bar.setHidden_(self.mode != "docx")
+        self.nav_wechat_bar.setHidden_(self.mode != "wechat")
+        self.nav_compress_bar.setHidden_(self.mode != "compress")
+        if hasattr(self, "compress_page"):
+            self.compress_page.setHidden_(self.mode != "compress")
+        if hasattr(self, "wechat_page"):
+            self.wechat_page.setHidden_(self.mode != "wechat")
         self.drop_zone.setNeedsDisplay_(True)
         self.docx_drop.setNeedsDisplay_(True)
         if hasattr(self, "wechat_drop"):
@@ -825,6 +882,231 @@ class Controller(NSObject):
         self.wechat_page.setHidden_(False)
         self._apply_theme()
         self._refresh_files()
+
+    @IBAction
+    def switchToCompress_(self, _sender):
+        self.mode = "compress"
+        self._apply_theme()
+
+    @objc.python_method
+    def _build_compress_page(self, body_h):
+        _fill_view(self.compress_page, C_APP_BG)
+        left = NSView.alloc().initWithFrame_(NSMakeRect(20, 20, 320, body_h - 40))
+        _resize(left, FILL_HEIGHT | NSViewMaxXMargin)
+        _set_view_style(left, C_WHITE, C_BORDER, 12)
+        self.compress_page.addSubview_(left)
+
+        left.addSubview_(_label("\u538b\u7f29\u8bbe\u7f6e", 18, left.bounds().size.height - 36, 160, 22, size=15, weight=0.65, color=C_TEXT_STRONG))
+
+        left.addSubview_(_label("\u4f7f\u7528\u573a\u666f", 18, left.bounds().size.height - 66, 120, 18, size=12, color=C_DIM))
+        self.compress_preset_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 94, 284, 28), False)
+        for lbl in IMAGE_COMPRESS_PRESET_LABELS:
+            self.compress_preset_popup.addItemWithTitle_(lbl)
+        self.compress_preset_popup.selectItemAtIndex_(self.compress_preset_idx)
+        self.compress_preset_popup.setTarget_(self)
+        self.compress_preset_popup.setAction_("compressPresetChanged:")
+        left.addSubview_(self.compress_preset_popup)
+
+        left.addSubview_(_label("\u76ee\u6807\u5927\u5c0f\uff08KB\uff09", 18, left.bounds().size.height - 128, 140, 18, size=12, color=C_DIM))
+        self.compress_target_field = _input_field(18, left.bounds().size.height - 156, 184, 28, placeholder="200")
+        self.compress_target_field.setStringValue_(str(self.compress_target_kb))
+        left.addSubview_(self.compress_target_field)
+        left.addSubview_(_label("\u4ec5\u8bc1\u4ef6/\u5408\u89c4\u573a\u666f\u751f\u6548", 208, left.bounds().size.height - 156, 96, 28, size=11, color=C_DIM))
+
+        left.addSubview_(_label("\u8f93\u51fa\u683c\u5f0f", 18, left.bounds().size.height - 188, 120, 18, size=12, color=C_DIM))
+        self.compress_fmt_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 216, 136, 28), False)
+        for lbl in IMAGE_COMPRESS_FMT_LABELS:
+            self.compress_fmt_popup.addItemWithTitle_(lbl)
+        self.compress_fmt_popup.selectItemAtIndex_(self.compress_fmt_idx)
+        left.addSubview_(self.compress_fmt_popup)
+
+        left.addSubview_(_label("\u753b\u8d28\u4e0a\u9650", 18, left.bounds().size.height - 244, 120, 18, size=12, color=C_DIM))
+        self.compress_q_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 272, 136, 28), False)
+        for lbl in IMAGE_COMPRESS_Q_LABELS:
+            self.compress_q_popup.addItemWithTitle_(lbl)
+        self.compress_q_popup.selectItemAtIndex_(self.compress_q_idx)
+        left.addSubview_(self.compress_q_popup)
+
+        self.compress_keep_chk = _checkbox("\u4fdd\u7559\u539f\u59cb\u6587\u4ef6\uff08\u9ed8\u8ba4\u5f00\uff09", 18, left.bounds().size.height - 304, 220, 22, checked=self.compress_keep_original)
+        left.addSubview_(self.compress_keep_chk)
+        self.compress_strip_chk = _checkbox("\u53bb\u9664 EXIF/\u5143\u6570\u636e\uff08\u9ed8\u8ba4\u5f00\uff09", 18, left.bounds().size.height - 330, 240, 22, checked=self.compress_strip_metadata)
+        left.addSubview_(self.compress_strip_chk)
+
+        left.addSubview_(_label("\u8f93\u51fa\u76ee\u5f55", 18, left.bounds().size.height - 364, 140, 18, size=12, color=C_DIM))
+        self.out_path_compress = _input_field(18, left.bounds().size.height - 392, 252, 28)
+        self.out_path_compress.setStringValue_(str(self.compress_output_dir).replace(str(Path.home()), "~"))
+        left.addSubview_(self.out_path_compress)
+        self.btn_out_compress = _btn("\U0001f4c1", 274, left.bounds().size.height - 392, 28, 28, self, "pickCompressOutputDir:")
+        left.addSubview_(self.btn_out_compress)
+
+        self.btn_open_compress_dir = _btn("\u6253\u5f00\u8f93\u51fa\u76ee\u5f55", 18, left.bounds().size.height - 428, 132, 28, self, "openCompressOutputDir:")
+        left.addSubview_(self.btn_open_compress_dir)
+
+        self.btn_start_left_compress = _btn("\u25b6  \u5f00\u59cb\u538b\u7f29", 18, 14, 284, 34, self, "startCompress:")
+        _resize(self.btn_start_left_compress, PIN_BOTTOM)
+        left.addSubview_(self.btn_start_left_compress)
+        _pin_panel_controls_to_top(left, (self.btn_start_left_compress,))
+
+        right = NSView.alloc().initWithFrame_(NSMakeRect(356, 20, self.compress_page.bounds().size.width - 376, body_h - 40))
+        _resize(right, FILL_WIDTH | FILL_HEIGHT)
+        self.compress_page.addSubview_(right)
+
+        self.compress_drop = DropZone.alloc().initWithFrame_controller_(NSMakeRect(0, right.bounds().size.height - 150, right.bounds().size.width, 150), self)
+        _resize(self.compress_drop, FILL_WIDTH | PIN_TOP)
+        right.addSubview_(self.compress_drop)
+        self.compress_drop.addSubview_(_register_file_drag(_label("\u62d6\u5165\u56fe\u7247\u6216\u70b9\u51fb\u9009\u62e9", right.bounds().size.width / 2 - 100, 88, 200, 22, size=15, weight=0.55, color=C_TEXT_STRONG, align=2)))
+        self.compress_drop.addSubview_(_register_file_drag(_label("\u652f\u6301 JPG / PNG / HEIC / TIFF / WebP", right.bounds().size.width / 2 - 130, 64, 260, 20, size=12, color=C_DIM, align=2)))
+        self.btn_pick_compress = _btn("\u9009\u62e9\u56fe\u7247", right.bounds().size.width / 2 - 44, 30, 88, 28, self, "selectCompressFiles:")
+        self.compress_drop.addSubview_(_register_file_drag(self.btn_pick_compress))
+
+        list_label = _label("\u538b\u7f29\u7ed3\u679c", 0, right.bounds().size.height - 180, 240, 22, size=14, weight=0.55, color=C_TEXT_STRONG)
+        _resize(list_label, PIN_TOP)
+        right.addSubview_(list_label)
+        list_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, right.bounds().size.width, right.bounds().size.height - 210))
+        _resize(list_scroll, FILL_WIDTH | FILL_HEIGHT)
+        list_scroll.setHasVerticalScroller_(True)
+        self.compress_list_text = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, right.bounds().size.width, right.bounds().size.height - 210))
+        _resize(self.compress_list_text, FILL_WIDTH | FILL_HEIGHT)
+        self.compress_list_text.setEditable_(False)
+        self.compress_list_text.setFont_(_font(13))
+        self.compress_list_text.setString_("\u62d6\u5165\u56fe\u7247\u540e\u70b9\u51fb\u201c\u5f00\u59cb\u538b\u7f29\u201d")
+        list_scroll.setDocumentView_(self.compress_list_text)
+        _set_view_style(list_scroll, C_WHITE, C_BORDER, 10)
+        right.addSubview_(list_scroll)
+
+    @objc.python_method
+    def _refresh_compress_list(self):
+        if not self.compress_files:
+            self.compress_list_text.setString_("\u62d6\u5165\u56fe\u7247\u540e\u70b9\u51fb\u201c\u5f00\u59cb\u538b\u7f29\u201d")
+            return
+        rows = ["\u6587\u4ef6\u540d\t\u539f\u5927\u5c0f\t\u538b\u540e\u5927\u5c0f\t\u8d28\u91cf\u6863\t\u72b6\u6001"]
+        for path in self.compress_files:
+            name = Path(path).name
+            r = self.compress_results.get(path)
+            if not r:
+                rows.append(f"{name}\t\u961f\u5217\u4e2d\t--\t--\t\u5f85\u5904\u7406")
+                continue
+            if not r.get("ok"):
+                err = (r.get("error") or "\u538b\u7f29\u5931\u8d25")[:40]
+                rows.append(f"{name}\t--\t--\t--\t{err}")
+                continue
+            before = r.get("before_bytes", 0)
+            after = r.get("after_bytes", 0)
+            q = r.get("quality", "-")
+            warn = " \u26a0" if r.get("warning") else ""
+            rows.append(f"{name}\t{before // 1024} KB\t{after // 1024} KB\tq{q}{warn}\t\u5b8c\u6210")
+        self.compress_list_text.setString_("\n".join(rows))
+
+    @objc.python_method
+    def _add_compress_files(self, paths):
+        added = 0
+        for p in paths:
+            ext = Path(p).suffix.lower().lstrip(".")
+            if ext not in IMAGE_EXTS:
+                continue
+            if p not in self.compress_files:
+                self.compress_files.append(p)
+                added += 1
+        if added:
+            self._refresh_compress_list()
+        return added
+
+    @IBAction
+    def selectCompressFiles_(self, _sender):
+        if threading.current_thread() is not threading.main_thread():
+            AppHelper.callAfter(self.selectCompressFiles_, _sender)
+            return
+        panel = NSOpenPanel.openPanel()
+        panel.setCanChooseFiles_(True)
+        panel.setCanChooseDirectories_(False)
+        panel.setAllowsMultipleSelection_(True)
+        if panel.runModal() == 1:
+            paths = [str(u.path()) for u in panel.URLs()]
+            self._add_compress_files(paths)
+
+    @IBAction
+    def compressPresetChanged_(self, sender):
+        self.compress_preset_idx = sender.indexOfSelectedItem()
+
+    @IBAction
+    def pickCompressOutputDir_(self, _sender):
+        if threading.current_thread() is not threading.main_thread():
+            AppHelper.callAfter(self.pickCompressOutputDir_, _sender)
+            return
+        panel = NSOpenPanel.openPanel()
+        panel.setCanChooseFiles_(False)
+        panel.setCanChooseDirectories_(True)
+        panel.setAllowsMultipleSelection_(False)
+        panel.setDirectoryURL_(NSURL.fileURLWithPath_(str(self.compress_output_dir)))
+        if panel.runModal() == 1:
+            self.compress_output_dir = Path(str(panel.URL().path())).expanduser().resolve()
+            self.out_path_compress.setStringValue_(str(self.compress_output_dir).replace(str(Path.home()), "~"))
+
+    @IBAction
+    def openCompressOutputDir_(self, _sender):
+        try:
+            self.compress_output_dir.mkdir(parents=True, exist_ok=True)
+            subprocess.Popen(["open", str(self.compress_output_dir)])
+        except Exception as e:
+            self._alert("\u538b\u7f29\u8f93\u51fa\u76ee\u5f55", str(e))
+
+    @IBAction
+    def startCompress_(self, _sender):
+        if not self.compress_files:
+            self._alert("\u56fe\u7247\u538b\u7f29", "\u8bf7\u5148\u62d6\u5165\u6216\u9009\u62e9\u8981\u538b\u7f29\u7684\u56fe\u7247")
+            return
+        try:
+            target_kb = int(self.compress_target_field.stringValue() or str(IMAGE_COMPRESS_DEFAULT_TARGET_KB))
+        except ValueError:
+            target_kb = IMAGE_COMPRESS_DEFAULT_TARGET_KB
+        self.compress_target_kb = max(20, target_kb)
+        preset_key = IMAGE_COMPRESS_PRESET_KEYS[self.compress_preset_idx]
+        fmt_key = IMAGE_COMPRESS_FMT_KEYS[self.compress_fmt_idx]
+        q_value = IMAGE_COMPRESS_Q_VALUES[self.compress_q_idx]
+        keep_original = bool(self.compress_keep_chk.state())
+        strip_metadata = bool(self.compress_strip_chk.state())
+        files = list(self.compress_files)
+        output_dir = str(self.compress_output_dir)
+        self.btn_start_left_compress.setEnabled_(False)
+        self.status_label.setStringValue_("\u538b\u7f29\u4e2d...")
+        self._set_progress(0.05, "0%")
+
+        def worker():
+            try:
+                if _imgc is None:
+                    self._call_on_main(self._alert, "\u538b\u7f29\u5931\u8d25", "image_compress \u6a21\u5757\u672a\u52a0\u8f7d\uff0c\u8bf7\u68c0\u67e5\u73af\u5883")
+                    return
+                results = _imgc.run_for_files(
+                    files,
+                    output_dir,
+                    preset=preset_key,
+                    target_kb=self.compress_target_kb,
+                    fmt=fmt_key,
+                    quality=q_value,
+                    strip_metadata=strip_metadata,
+                )
+
+                def done():
+                    self.compress_results = {r["input"]: r for r in results["results"]}
+                    warn = next((r["warning"] for r in results["results"] if r.get("warning")), None)
+                    self.compress_last_run = {"ok": results["ok"], "warning": warn}
+                    self.compress_files = []
+                    self._refresh_compress_list()
+                    self.btn_start_left_compress.setEnabled_(True)
+                    if results["ok"]:
+                        self.status_label.setStringValue_("\u538b\u7f29\u5b8c\u6210")
+                    else:
+                        self.status_label.setStringValue_("\u538b\u7f29\u90e8\u5206\u6210\u529f")
+                        failed = [r["name"] for r in results["results"] if not r.get("ok")]
+                        if failed:
+                            self._alert("\u538b\u7f29\u7ed3\u679c", "\u4ee5\u4e0b\u6587\u4ef6\u538b\u7f29\u5931\u8d25: " + ", ".join(failed[:5]))
+                    self._set_progress(1.0, "100%")
+                self._call_on_main(done)
+            except Exception as e:
+                self._call_on_main(self._alert, "\u538b\u7f29\u51fa\u9519", str(e))
+                self._call_on_main(lambda: (self.btn_start_left_compress.setEnabled_(True), self.status_label.setStringValue_("\u5df2\u5c31\u7eea")))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     @IBAction
     def noop_(self, _sender):
