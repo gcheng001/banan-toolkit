@@ -112,6 +112,8 @@ IMAGE_COMPRESS_FMT_LABELS = ["WebP（推荐）", "JPEG", "PNG（不压缩）"]
 IMAGE_COMPRESS_FMT_KEYS = ["webp", "jpeg", "png"]
 IMAGE_COMPRESS_Q_LABELS = ["极清（90）", "高（80）", "中（70）", "低（60）"]
 IMAGE_COMPRESS_Q_VALUES = [90, 80, 70, 60]
+IMAGE_COMPRESS_MAXPX_LABELS = ["不限", "3000 px", "2000 px", "1600 px", "1200 px"]
+IMAGE_COMPRESS_MAXPX_VALUES = [0, 3000, 2000, 1600, 1200]
 IMAGE_COMPRESS_DEFAULT_TARGET_KB = 200
 
 
@@ -367,6 +369,7 @@ class Controller(NSObject):
         self.compress_preset_idx = 0
         self.compress_fmt_idx = 0
         self.compress_q_idx = 0
+        self.compress_maxpx_idx = 0
         self.compress_target_kb = IMAGE_COMPRESS_DEFAULT_TARGET_KB
         self.compress_keep_original = True
         self.compress_strip_metadata = True
@@ -948,6 +951,15 @@ class Controller(NSObject):
         self.compress_q_popup.setTarget_(self)
         self.compress_q_popup.setAction_("compressQChanged:")
 
+        left.addSubview_(_label("\u6700\u957f\u8fb9", 162, left.bounds().size.height - 244, 120, 18, size=12, color=C_DIM))
+        self.compress_maxpx_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(162, left.bounds().size.height - 272, 140, 28), False)
+        for lbl in IMAGE_COMPRESS_MAXPX_LABELS:
+            self.compress_maxpx_popup.addItemWithTitle_(lbl)
+        self.compress_maxpx_popup.selectItemAtIndex_(self.compress_maxpx_idx)
+        left.addSubview_(self.compress_maxpx_popup)
+        self.compress_maxpx_popup.setTarget_(self)
+        self.compress_maxpx_popup.setAction_("compressMaxPxChanged:")
+
         self.compress_keep_chk = _checkbox("\u4fdd\u7559\u539f\u59cb\u6587\u4ef6\uff08\u9ed8\u8ba4\u5f00\uff09", 18, left.bounds().size.height - 304, 220, 22, checked=self.compress_keep_original)
         left.addSubview_(self.compress_keep_chk)
         self.compress_strip_chk = _checkbox("\u53bb\u9664 EXIF/\u5143\u6570\u636e\uff08\u9ed8\u8ba4\u5f00\uff09", 18, left.bounds().size.height - 330, 240, 22, checked=self.compress_strip_metadata)
@@ -1014,8 +1026,9 @@ class Controller(NSObject):
             before = r.get("before_bytes", 0)
             after = r.get("after_bytes", 0)
             q = r.get("quality", "-")
+            dim = f"@{r['resized_to']}px" if r.get("resized_to") else ""
             warn = " \u26a0" if r.get("warning") else ""
-            rows.append(f"{name}\t{before // 1024} KB\t{after // 1024} KB\tq{q}{warn}\t\u5b8c\u6210")
+            rows.append(f"{name}\t{before // 1024} KB\t{after // 1024} KB\tq{q}{dim}{warn}\t\u5b8c\u6210")
         self.compress_list_text.setString_("\n".join(rows))
 
     @objc.python_method
@@ -1058,6 +1071,10 @@ class Controller(NSObject):
         self.compress_q_idx = sender.indexOfSelectedItem()
 
     @IBAction
+    def compressMaxPxChanged_(self, sender):
+        self.compress_maxpx_idx = sender.indexOfSelectedItem()
+
+    @IBAction
     def pickCompressOutputDir_(self, _sender):
         if threading.current_thread() is not threading.main_thread():
             AppHelper.callAfter(self.pickCompressOutputDir_, _sender)
@@ -1092,6 +1109,7 @@ class Controller(NSObject):
         preset_key = IMAGE_COMPRESS_PRESET_KEYS[self.compress_preset_idx]
         fmt_key = IMAGE_COMPRESS_FMT_KEYS[self.compress_fmt_idx]
         q_value = IMAGE_COMPRESS_Q_VALUES[self.compress_q_idx]
+        maxpx_value = IMAGE_COMPRESS_MAXPX_VALUES[self.compress_maxpx_idx]
         keep_original = bool(self.compress_keep_chk.state())
         strip_metadata = bool(self.compress_strip_chk.state())
         files = list(self.compress_files)
@@ -1113,6 +1131,7 @@ class Controller(NSObject):
                     fmt=fmt_key,
                     quality=q_value,
                     strip_metadata=strip_metadata,
+                    max_px=maxpx_value,
                 )
 
                 def done():
