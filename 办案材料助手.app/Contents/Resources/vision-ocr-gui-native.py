@@ -770,6 +770,13 @@ class Controller(NSObject):
         self.progress_bar.setAccent_(accent)
         self.pct_label.setTextColor_(C_TEXT_STRONG)
         self.btn_start.setTitle_(start_title)
+        if self.mode == "compress":
+            self.btn_start.setTarget_(self)
+            self.btn_start.setAction_("startCompress:")
+            self.btn_start.setEnabled_(not bool(self.active_child_proc))
+        else:
+            self.btn_start.setTarget_(self)
+            self.btn_start.setAction_("startProcessing:")
         self.btn_start_left_ocr.setTitle_("▶  转为 Markdown")
         self.btn_start_left_docx.setTitle_("⇄  开始转换")
 
