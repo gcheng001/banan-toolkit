@@ -304,7 +304,18 @@ class DropZone(NSView):
         if not paths:
             urls = pb.readObjectsForClasses_options_([NSURL], None) or []
             paths = [url.path() for url in urls if url and url.isFileURL()]
-        allowed = VIDEO_EXTS if self.ctrl.mode == "wechat" else (TO_MARKDOWN_EXTS if self.ctrl.mode == "ocr" else DOCX_EXTS)
+        m = self.ctrl.mode
+        if m == "wechat":
+            allowed = VIDEO_EXTS
+        elif m == "ocr":
+            allowed = TO_MARKDOWN_EXTS
+        elif m == "compress":
+            allowed = IMAGE_EXTS
+        else:
+            allowed = DOCX_EXTS
+        add_fn = self.ctrl._add_compress_files if m == "compress" else self.ctrl._add_file
+        add_str = "已添加 " if m != "compress" else "已添加 "
+        refresh_fn = self.ctrl._refresh_compress_list if m == "compress" else self.ctrl._refresh_files
         added = 0
         for p in paths:
             p = str(p)
@@ -314,13 +325,13 @@ class DropZone(NSView):
                     if os.path.isfile(fp):
                         ext = Path(fp).suffix.lower().lstrip(".")
                         if ext in allowed:
-                            added += self.ctrl._add_file(fp)
+                            added += add_fn([fp])
             elif os.path.isfile(p):
                 ext = Path(p).suffix.lower().lstrip(".")
                 if ext in allowed:
-                    added += self.ctrl._add_file(p)
-        self.ctrl._refresh_files()
-        self.ctrl.status_label.setStringValue_(f"已添加 {added} 个文件" if added else "没有可用文件")
+                    added += add_fn([p])
+        refresh_fn()
+        self.ctrl.status_label.setStringValue_(("已添加 " if m != "compress" else "已添加 ") + str(added) + " 个文件" if added else "没有可用文件")
         return True
 
 
@@ -919,6 +930,8 @@ class Controller(NSObject):
             self.compress_fmt_popup.addItemWithTitle_(lbl)
         self.compress_fmt_popup.selectItemAtIndex_(self.compress_fmt_idx)
         left.addSubview_(self.compress_fmt_popup)
+        self.compress_fmt_popup.setTarget_(self)
+        self.compress_fmt_popup.setAction_("compressFmtChanged:")
 
         left.addSubview_(_label("\u753b\u8d28\u4e0a\u9650", 18, left.bounds().size.height - 244, 120, 18, size=12, color=C_DIM))
         self.compress_q_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 272, 136, 28), False)
@@ -926,20 +939,22 @@ class Controller(NSObject):
             self.compress_q_popup.addItemWithTitle_(lbl)
         self.compress_q_popup.selectItemAtIndex_(self.compress_q_idx)
         left.addSubview_(self.compress_q_popup)
+        self.compress_q_popup.setTarget_(self)
+        self.compress_q_popup.setAction_("compressQChanged:")
 
         self.compress_keep_chk = _checkbox("\u4fdd\u7559\u539f\u59cb\u6587\u4ef6\uff08\u9ed8\u8ba4\u5f00\uff09", 18, left.bounds().size.height - 304, 220, 22, checked=self.compress_keep_original)
         left.addSubview_(self.compress_keep_chk)
         self.compress_strip_chk = _checkbox("\u53bb\u9664 EXIF/\u5143\u6570\u636e\uff08\u9ed8\u8ba4\u5f00\uff09", 18, left.bounds().size.height - 330, 240, 22, checked=self.compress_strip_metadata)
         left.addSubview_(self.compress_strip_chk)
 
-        left.addSubview_(_label("\u8f93\u51fa\u76ee\u5f55", 18, left.bounds().size.height - 364, 140, 18, size=12, color=C_DIM))
-        self.out_path_compress = _input_field(18, left.bounds().size.height - 392, 252, 28)
+        left.addSubview_(_label("\u8f93\u51fa\u76ee\u5f55", 18, left.bounds().size.height - 402, 140, 18, size=12, color=C_DIM))
+        self.out_path_compress = _input_field(18, left.bounds().size.height - 430, 252, 28)
         self.out_path_compress.setStringValue_(str(self.compress_output_dir).replace(str(Path.home()), "~"))
         left.addSubview_(self.out_path_compress)
-        self.btn_out_compress = _btn("\U0001f4c1", 274, left.bounds().size.height - 392, 28, 28, self, "pickCompressOutputDir:")
+        self.btn_out_compress = _btn("\U0001f4c1", 274, left.bounds().size.height - 430, 28, 28, self, "pickCompressOutputDir:")
         left.addSubview_(self.btn_out_compress)
 
-        self.btn_open_compress_dir = _btn("\u6253\u5f00\u8f93\u51fa\u76ee\u5f55", 18, left.bounds().size.height - 428, 132, 28, self, "openCompressOutputDir:")
+        self.btn_open_compress_dir = _btn("\u6253\u5f00\u8f93\u51fa\u76ee\u5f55", 18, left.bounds().size.height - 466, 132, 28, self, "openCompressOutputDir:")
         left.addSubview_(self.btn_open_compress_dir)
 
         self.btn_start_left_compress = _btn("\u25b6  \u5f00\u59cb\u538b\u7f29", 18, 14, 284, 34, self, "startCompress:")
@@ -1027,6 +1042,14 @@ class Controller(NSObject):
     @IBAction
     def compressPresetChanged_(self, sender):
         self.compress_preset_idx = sender.indexOfSelectedItem()
+
+    @IBAction
+    def compressFmtChanged_(self, sender):
+        self.compress_fmt_idx = sender.indexOfSelectedItem()
+
+    @IBAction
+    def compressQChanged_(self, sender):
+        self.compress_q_idx = sender.indexOfSelectedItem()
 
     @IBAction
     def pickCompressOutputDir_(self, _sender):
