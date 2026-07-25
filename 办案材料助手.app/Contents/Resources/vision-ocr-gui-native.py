@@ -314,7 +314,6 @@ class DropZone(NSView):
         else:
             allowed = DOCX_EXTS
         add_fn = self.ctrl._add_compress_files if m == "compress" else self.ctrl._add_file
-        add_str = "已添加 " if m != "compress" else "已添加 "
         refresh_fn = self.ctrl._refresh_compress_list if m == "compress" else self.ctrl._refresh_files
         added = 0
         for p in paths:
@@ -331,7 +330,7 @@ class DropZone(NSView):
                 if ext in allowed:
                     added += add_fn([p])
         refresh_fn()
-        self.ctrl.status_label.setStringValue_(("已添加 " if m != "compress" else "已添加 ") + str(added) + " 个文件" if added else "没有可用文件")
+        self.ctrl.status_label.setStringValue_(f"已添加 {added} 个文件" if added else "没有可用文件")
         return True
 
 
