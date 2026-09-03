@@ -402,6 +402,10 @@ if __name__ == "__main__":
     ap.add_argument("--max-px", type=int, default=0)
     ap.add_argument("--no-strip", action="store_true")
     args = ap.parse_args()
+    if args.target_kb <= 0:
+        ap.error("--target-kb must be a positive number of KB")
+    if args.quality <= 0 or args.quality > 100:
+        ap.error("--quality must be an integer between 1 and 100")
     if args.preset == PRESET_SOCIAL:
         out = compress_for_social(args.input, args.output_dir, fmt=args.format, quality=args.quality, strip_metadata=not args.no_strip, max_px=args.max_px)
     elif args.preset == PRESET_ID:

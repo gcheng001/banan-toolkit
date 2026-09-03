@@ -7,6 +7,7 @@ import io
 import datetime as _dt
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -176,9 +177,9 @@ def _extract_frames(
 
 def _warn_if_huge(interval_sec: float, start_sec: float, duration_sec: Optional[float], max_frames: int) -> None:
     # Conservative heuristic: warn when user might create a giant export.
-    if interval_sec <= 0:
+    if not math.isfinite(interval_sec) or interval_sec <= 0:
         return
-    if duration_sec is None or duration_sec <= 0:
+    if duration_sec is None:
         # Unknown total duration without ffprobe; avoid extra deps and just warn on tiny interval.
         if interval_sec < 1 and max_frames <= 0:
             print(
@@ -186,6 +187,8 @@ def _warn_if_huge(interval_sec: float, start_sec: float, duration_sec: Optional[
                 "Consider --max-frames or --duration.",
                 file=sys.stderr,
             )
+        return
+    if not math.isfinite(duration_sec) or duration_sec <= 0:
         return
     estimated = int(duration_sec / interval_sec) + 2
     if max_frames > 0:
@@ -420,10 +423,13 @@ def _read_jsonl(path: Path) -> List[dict]:
         _die(f"Missing index file: {path}")
     records: List[dict] = []
     with path.open("r", encoding="utf-8") as fp:
-        for line in fp:
+        for line_no, line in enumerate(fp, start=1):
             line = line.strip()
             if line:
-                records.append(json.loads(line))
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError as exc:
+                    _die(f"Corrupted index file {path} at line {line_no}: {exc}")
     return records
 
 
@@ -1430,10 +1436,14 @@ def cmd_interval_pdf(args: argparse.Namespace) -> None:
 
     if args.interval <= 0:
         _die("--interval must be > 0")
+    if not math.isfinite(args.interval):
+        _die("--interval must be a finite number")
     if args.start < 0:
         _die("--start must be >= 0")
     if args.duration is not None and args.duration < 0:
         _die("--duration must be >= 0")
+    if args.duration is not None and not math.isfinite(args.duration):
+        _die("--duration must be a finite number")
     if args.max_frames is not None and args.max_frames < 0:
         _die("--max-frames must be >= 0")
     if args.max_width is not None and args.max_width < 0:
