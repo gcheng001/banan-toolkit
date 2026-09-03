@@ -12,17 +12,33 @@
 		<data>
 		uUdxOOAMscJrilw9fXBptWO36iY=
 		</data>
-		<key>Resources/AppIcon.icns.bak-20260614-084517</key>
-		<data>
-		+GYUGx4OzANw8+mdQ+asEhdhK1c=
-		</data>
 		<key>Resources/README.md</key>
 		<data>
 		TgZg3jTednRSsSWh4b0AlezVEws=
 		</data>
+		<key>Resources/__pycache__/image_compress.cpython-313.pyc</key>
+		<data>
+		fMueLHTOue1ub8uvalgqvS/LCe8=
+		</data>
+		<key>Resources/__pycache__/image_compress.cpython-314.pyc</key>
+		<data>
+		3HuDR5jwv1LLpFY5gIaeOMqrY9w=
+		</data>
+		<key>Resources/__pycache__/vision-ocr-gui-native.cpython-313.pyc</key>
+		<data>
+		sLsJQXP320f3DATYWtKUTBi7u9A=
+		</data>
+		<key>Resources/__pycache__/vision-ocr-gui-native.cpython-314.pyc</key>
+		<data>
+		b9lAn03XaHBs5IhGGBJwLgFa3sQ=
+		</data>
+		<key>Resources/image_compress.py</key>
+		<data>
+		HDRdhn+qow5cGGz8Hi47WLScbPA=
+		</data>
 		<key>Resources/vision-ocr-gui-native.py</key>
 		<data>
-		/KIDjcKXxg/c6RcuEUog1XOaLcI=
+		QlmB3rnq/FJVEtjxu4j+LkN1tXQ=
 		</data>
 		<key>Resources/vision_ocr_utils.py</key>
 		<data>
@@ -30,7 +46,7 @@
 		</data>
 		<key>Resources/wechat_evidence.py</key>
 		<data>
-		2pTM+BWoc4w94tjFxMtiGYGDX/U=
+		YAx3+YrWcvgzxYDoXnQjo2gv77o=
 		</data>
 		<key>Resources/使用说明.md</key>
 		<data>
@@ -47,15 +63,6 @@
 			</data>
 			<key>requirement</key>
 			<string>cdhash H"cc5f2b5e6ac3d32d6fb457588956e0cebfe3a34e"</string>
-		</dict>
-		<key>MacOS/droplet.bak-merge-20260609</key>
-		<dict>
-			<key>cdhash</key>
-			<data>
-			B7KqE6KKUy2ZuLqxxdu6C2Icjr8=
-			</data>
-			<key>requirement</key>
-			<string>cdhash H"07b2aa13a28a532d99b8bab1c5dbba0b621c8ebf"</string>
 		</dict>
 		<key>MacOS/droplet.sh</key>
 		<dict>
@@ -80,13 +87,6 @@
 			c6JqRydmyOXGh+92EFbWNlM2NClUU2vztS2vYOZuWsI=
 			</data>
 		</dict>
-		<key>Resources/AppIcon.icns.bak-20260614-084517</key>
-		<dict>
-			<key>hash2</key>
-			<data>
-			Fpndor6JPQLpaRyzRRH6jbsVF5gxKdlWonPTY2SiYmA=
-			</data>
-		</dict>
 		<key>Resources/README.md</key>
 		<dict>
 			<key>hash2</key>
@@ -94,11 +94,46 @@
 			OTg6ZrZIGxy+MuBkZVZjytsuHuuBdSoxBJVj3yoJKbM=
 			</data>
 		</dict>
+		<key>Resources/__pycache__/image_compress.cpython-313.pyc</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			LSilPW4aikjjEW90H0qQaIF/ejWmL1qAIRSvfK5omHI=
+			</data>
+		</dict>
+		<key>Resources/__pycache__/image_compress.cpython-314.pyc</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			VDmdvWczWoz8aKeLexn0RNetwkpvGwXJ5gxqx6/LoLg=
+			</data>
+		</dict>
+		<key>Resources/__pycache__/vision-ocr-gui-native.cpython-313.pyc</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			bz6iHf4F1E+iFoFHJbAn/3xZPrzBCPHPzwWuO62h+6U=
+			</data>
+		</dict>
+		<key>Resources/__pycache__/vision-ocr-gui-native.cpython-314.pyc</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			IbtYaqTjtp8FPOD+weank4dTCe8q2Y0WHS3H62ww7p0=
+			</data>
+		</dict>
+		<key>Resources/image_compress.py</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			JdUvfieGfRiOBb5rrbZssHCZkq6S+cQwEkYhVFC8L0A=
+			</data>
+		</dict>
 		<key>Resources/vision-ocr-gui-native.py</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			7vou5WbTFxmdcHRiDS3DNnOu6hMxYKuKLfcabc7tg5g=
+			uhRvFqq0hbIrjj4jdf4AwcgTmbFbIU5OUbl7O8QYgTU=
 			</data>
 		</dict>
 		<key>Resources/vision_ocr_utils.py</key>
@@ -112,7 +147,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			eHDqdXq7lKoFCEeE/oPMEn44M6h6brLM6ilxAax3vbY=
+			5GSs+tn2VRJMFewTSKa85xHTAWZepNm6zCI0mgS54Mw=
 			</data>
 		</dict>
 		<key>Resources/使用说明.md</key>
