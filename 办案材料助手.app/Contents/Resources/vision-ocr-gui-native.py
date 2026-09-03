@@ -1333,10 +1333,13 @@ class Controller(NSObject):
             # 保存到原文件
             backup = pdf_path.with_suffix(".pdf.bak")
             if not backup.exists():
-                pdf_path.rename(backup)
-                doc.save(str(pdf_path))
-                doc.close()
-                return True
+                try:
+                    pdf_path.rename(backup)
+                except OSError:
+                    pass  # 备份失败不阻塞去水印：仍然保存本次修改
+            doc.save(str(pdf_path))
+            doc.close()
+            return True
 
         doc.close()
         return False
@@ -1362,9 +1365,12 @@ class Controller(NSObject):
         # 备份原文件
         backup = md_path.with_suffix(md_path.suffix + ".bak")
         if not backup.exists():
-            md_path.rename(backup)
-            md_path.write_text(new_content, encoding="utf-8")
-            return True
+            try:
+                md_path.rename(backup)
+            except OSError:
+                pass  # 备份失败不阻塞去水印：仍然写入本次修改
+        md_path.write_text(new_content, encoding="utf-8")
+        return True
 
         return False
 

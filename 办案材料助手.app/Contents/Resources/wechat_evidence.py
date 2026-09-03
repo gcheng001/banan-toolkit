@@ -1410,6 +1410,8 @@ def cmd_interval_pdf(args: argparse.Namespace) -> None:
             _die(f"Video not found: {v}")
 
     variants: List[float] = list(args.variants or [])
+    if any(not math.isfinite(v) for v in variants):
+        _die("--variants values must be finite numbers")
     stride_frames = _parse_stride_frames(getattr(args, "stride_frames", ""))
     stride_seconds = _parse_stride_seconds(getattr(args, "stride_seconds", ""))
     raw_cache_interval = float(getattr(args, "raw_cache_interval", 0.0) or 0.0)
@@ -1476,12 +1478,25 @@ def cmd_interval_pdf(args: argparse.Namespace) -> None:
             _die("--out-dir can only be used with a single input video.")
         out_dirs = [Path(args.out_dir).expanduser().resolve()]
     else:
-        out_dirs = [_unique_out_dir(out_base, v) for v in videos]
+        out_dirs = []
+        # Allocate and create incrementally so two videos never share one
+        # directory: each directory exists before the next name is generated.
+        for v in videos:
+            out_dir = _unique_out_dir(out_base, v)
+            try:
+                out_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                _die(f"Cannot create output directory: {out_dir}: {e}")
+            out_dirs.append(out_dir)
 
     keep_frames = args.keep_frames
 
     for video_path, out_dir in zip(videos, out_dirs):
-        out_dir.mkdir(parents=True, exist_ok=True)
+        if not out_dir.exists():
+            try:
+                out_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                _die(f"Cannot create output directory: {out_dir}: {e}")
         frames_dir = _final_frames_dir(out_dir)
         index_path = _frame_index_path(out_dir)
         pdf_path = Path(args.pdf).expanduser().resolve() if args.pdf else _pdf_path(out_dir)
