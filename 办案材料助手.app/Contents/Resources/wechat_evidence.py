@@ -475,13 +475,170 @@ def _strip_markdown_emphasis(text: str) -> str:
     return stripped
 
 
+_FULL_CHAT_TIME_RE = re.compile(r"^\s*(\d{4}年\d{1,2}月\d{1,2}日\s+\d{1,2}:\d{2})\s*$")
+_ANY_CHAT_TIME_RE = re.compile(r"(\d{4}年\d{1,2}月\d{1,2}日\s*)?\d{1,2}:\d{2}")
+_NOISE_EXACT = {
+    "<",
+    ">",
+    "+",
+    "©",
+    "③",
+    "⑤ +",
+    "•••",
+    "••。",
+    "=•。",
+    "=••",
+    "朋友圈",
+    "发消息",
+    "音视频通话",
+    "朋友资料",
+    "电话",
+    "地区",
+    "昵称",
+}
+_NOISE_KEYWORDS = (
+    "中国电信",
+    "专注模式",
+    "未在播放",
+    "微信号：",
+    "昵称：",
+    "地区：",
+    "朋友使用的铃声",
+)
+
+
+def _normalise_message_key(text: str) -> str:
+    text = _strip_markdown_emphasis(text)
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"[，。！？、；：:,.!?;\"'“”‘’（）()【】\\[\\]<>《》\-_=+•·*#|/\\\\]", "", text)
+    return text.lower()
+
+
+def _is_noise_line(line: str) -> bool:
+    clean = _strip_markdown_emphasis(line).strip()
+    compact = re.sub(r"\s+", "", clean)
+    if not clean:
+        return True
+    if clean in _NOISE_EXACT or compact in _NOISE_EXACT:
+        return True
+    if any(keyword in clean for keyword in _NOISE_KEYWORDS):
+        return True
+    if re.fullmatch(r"[oO0lLI1|！!:.。•·＊*()（）\[\]【】]+", compact):
+        return True
+    if re.fullmatch(r"[①②③④⑤⑥⑦⑧⑨⑩]?[•·]?\d{1,2}\"[（(]?", compact):
+        return True
+    return False
+
+
+def _clean_chat_lines(text: str) -> List[str]:
+    lines = []
+    for raw in text.splitlines():
+        line = _strip_markdown_emphasis(raw).strip().strip("| ")
+        line = re.sub(r"\s+", " ", line).strip()
+        if _is_noise_line(line):
+            continue
+        lines.append(line)
+    return lines
+
+
+def _infer_speaker(content: str) -> str:
+    compact = _normalise_message_key(content)
+    if not compact:
+        return "需人工确认"
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    if "撤回了一条消息" in content or "你已添加" in content or "以上是打招呼的内容" in content:
+        return "系统/微信"
+    if lines and "通话时长" in lines[0] and len(lines) <= 2:
+        return "系统/微信"
+    return "需人工确认"
+
+
+def _flush_chat_message(
+    messages: List[dict],
+    record: dict,
+    chat_time: str,
+    lines: List[str],
+    seen_message_keys: set,
+    seen_line_keys: set,
+) -> None:
+    cleaned_lines = [line for line in lines if not _is_noise_line(line)]
+    if not cleaned_lines:
+        return
+
+    new_lines = []
+    local_line_keys = set()
+    skipped_lines = 0
+    for line in cleaned_lines:
+        key = _normalise_message_key(line)
+        if len(key) >= 4 and (key in seen_line_keys or key in local_line_keys):
+            skipped_lines += 1
+            continue
+        new_lines.append(line)
+        if len(key) >= 4:
+            local_line_keys.add(key)
+
+    if not new_lines:
+        return
+
+    content = "\n".join(new_lines).strip()
+    message_key = f"{chat_time}|{_normalise_message_key(content)}"
+    if len(message_key) >= 8 and message_key in seen_message_keys:
+        return
+
+    for line in new_lines:
+        key = _normalise_message_key(line)
+        if len(key) >= 4:
+            seen_line_keys.add(key)
+    seen_message_keys.add(message_key)
+
+    messages.append(
+        {
+            "chat_time": chat_time or "需人工确认",
+            "speaker": _infer_speaker(content),
+            "content": content,
+            "frame": record.get("frame", ""),
+            "timestamp_hms": record.get("timestamp_hms", ""),
+            "frame_path": record.get("frame_path", ""),
+            "sha256": record.get("sha256", ""),
+            "dedupe_note": f"跳过重复行 {skipped_lines} 条" if skipped_lines else "",
+        }
+    )
+
+
+def _extract_structured_chat_messages(records: List[dict]) -> List[dict]:
+    messages: List[dict] = []
+    seen_message_keys: set = set()
+    seen_line_keys: set = set()
+    for record in records:
+        lines = _clean_chat_lines(record.get("chat_content") or record.get("text") or "")
+        current_time = ""
+        buffer: List[str] = []
+        for line in lines:
+            full_time = _FULL_CHAT_TIME_RE.match(line)
+            if full_time:
+                _flush_chat_message(messages, record, current_time, buffer, seen_message_keys, seen_line_keys)
+                current_time = full_time.group(1)
+                buffer = []
+                continue
+            if current_time:
+                buffer.append(line)
+        _flush_chat_message(messages, record, current_time, buffer, seen_message_keys, seen_line_keys)
+    return messages
+
+
+def _markdown_cell(text: str, limit: int = 300) -> str:
+    text = re.sub(r"\s+", "<br>", str(text or "").strip())
+    if len(text) > limit:
+        text = text[:limit].rstrip() + "..."
+    return text.replace("|", "｜")
+
+
 def _extract_chat_fields(text: str) -> Tuple[str, str]:
-    time_pattern = re.compile(r"(\d{4}年\d{1,2}月\d{1,2}日\s*)?\d{1,2}:\d{2}")
     lines = [_strip_markdown_emphasis(line) for line in text.splitlines() if line.strip()]
     chat_time = ""
     content_start = 0
     for idx, line in enumerate(lines):
-        if time_pattern.search(line):
+        if _ANY_CHAT_TIME_RE.search(line):
             chat_time = line
             content_start = idx + 1
             break
@@ -529,6 +686,19 @@ def _records_for_ocr(out_dir: Path, scope: str) -> List[dict]:
         return records
     _die(f"Unsupported OCR scope: {scope}")
     raise AssertionError("unreachable")
+
+
+def _cached_ocr_records(out_dir: Path) -> dict[Tuple[str, str], dict]:
+    cached: dict[Tuple[str, str], dict] = {}
+    index_path = _ocr_index_path(out_dir)
+    if not index_path.exists():
+        return cached
+    for record in _read_jsonl(index_path):
+        frame = str(record.get("frame") or "")
+        sha = str(record.get("sha256") or "")
+        if frame and sha and ("text" in record or record.get("status")):
+            cached[(frame, sha)] = record
+    return cached
 
 
 def _ocr_single_record(record: dict) -> dict:
@@ -599,18 +769,42 @@ def _write_ocr_outputs(out_dir: Path, records: List[dict], scope: str) -> Tuple[
         for record in records:
             fp.write(json.dumps(record, ensure_ascii=False) + "\n")
 
+    messages = _extract_structured_chat_messages(records)
     lines = [
-        "# 微信录屏 OCR 文字索引",
+        "# 微信聊天记录转写 MD",
         "",
-        "需人工核实。OCR 仅用于检索、定位和辅助复核，不替代原始录屏与截图。",
+        "需人工核实。本文件根据录屏截图 OCR 自动整理，发言人仅在能稳定判断时标注；不能可靠判断时写“需人工确认”。",
         "",
         f"- 识别范围：{'入选截图' if scope == 'selected' else '原始抽帧'}",
-        f"- 记录数：{len(records)}",
+        f"- OCR 截图数：{len(records)}",
+        f"- 去重后聊天条目：{len(messages)}",
+        "- 去重规则：相邻截图中已经出现过的相同话语不重复列入；保留来源截图用于人工复核。",
         "",
+        "## 结构化聊天记录（去重）",
+        "",
+        "| 序号 | 聊天时间 | 发言人 | 内容 | 来源截图 | 录屏时间 | 处理说明 |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
     ]
+    if messages:
+        for idx, message in enumerate(messages, start=1):
+            lines.append(
+                "| {idx} | {chat_time} | {speaker} | {content} | {frame} | {screen_time} | {note} |".format(
+                    idx=idx,
+                    chat_time=_markdown_cell(message.get("chat_time", ""), 80),
+                    speaker=_markdown_cell(message.get("speaker", ""), 80),
+                    content=_markdown_cell(message.get("content", ""), 500),
+                    frame=_markdown_cell(message.get("frame", ""), 80),
+                    screen_time=_markdown_cell(message.get("timestamp_hms", ""), 80),
+                    note=_markdown_cell(message.get("dedupe_note", ""), 120),
+                )
+            )
+    else:
+        lines.append("| 1 | 需人工确认 | 需人工确认 | 未能从 OCR 中稳定抽取聊天条目 |  |  |  |")
+
+    lines.extend(["", "## 按截图复核 OCR", ""])
     for idx, record in enumerate(records, start=1):
         chat_time = record.get("chat_time", "")
-        chat_content = record.get("chat_content", "") or record.get("text", "")
+        chat_content = "\n".join(_clean_chat_lines(record.get("chat_content", "") or record.get("text", "")))
         lines.extend(
             [
                 f"## {idx}. {record.get('frame', '')}",
@@ -631,14 +825,11 @@ def _write_ocr_outputs(out_dir: Path, records: List[dict], scope: str) -> Tuple[
 
 def _speaker_counts(records: List[dict]) -> dict[str, int]:
     counts: dict[str, int] = {}
-    for record in records:
-        content = record.get("chat_content", "") or record.get("text", "")
-        lines = [_strip_markdown_emphasis(line) for line in content.splitlines() if line.strip()]
-        if len(lines) < 2:
+    for message in _extract_structured_chat_messages(records):
+        speaker = message.get("speaker", "")
+        if not speaker or speaker == "需人工确认":
             continue
-        speaker = lines[0].strip("：: ")
-        if 1 <= len(speaker) <= 12 and not re.search(r"\d{1,2}:\d{2}", speaker):
-            counts[speaker] = counts.get(speaker, 0) + 1
+        counts[speaker] = counts.get(speaker, 0) + 1
     return counts
 
 
@@ -670,6 +861,7 @@ def _event_summary(record: dict) -> str:
 
 def _write_local_analysis_report(out_dir: Path, records: List[dict]) -> Path:
     report_path = _analysis_report_path(out_dir)
+    messages = _extract_structured_chat_messages(records)
     speakers = _speaker_counts(records)
     amounts = _amount_candidates(records)
     speaker_text = "、".join(f"{name}（{count}条）" for name, count in sorted(speakers.items(), key=lambda item: -item[1]))
@@ -693,19 +885,22 @@ def _write_local_analysis_report(out_dir: Path, records: List[dict]) -> Path:
         "",
         "## 三、时间线",
         "",
-        "| 序号 | 录屏时间 | 聊天时间 | 对应截图 | 事件 / 内容 |",
-        "| --- | --- | --- | --- | --- |",
+        "| 序号 | 聊天时间 | 发言人 | 事件 / 内容 | 对应截图 | 录屏时间 |",
+        "| --- | --- | --- | --- | --- | --- |",
     ]
-    for idx, record in enumerate(records, start=1):
+    for idx, message in enumerate(messages, start=1):
         lines.append(
-            "| {idx} | {screen_time} | {chat_time} | {frame} | {event} |".format(
+            "| {idx} | {chat_time} | {speaker} | {event} | {frame} | {screen_time} |".format(
                 idx=idx,
-                screen_time=record.get("timestamp_hms", ""),
-                chat_time=record.get("chat_time", "") or "（未识别）",
-                frame=record.get("frame", ""),
-                event=_event_summary(record).replace("|", "｜"),
+                chat_time=_markdown_cell(message.get("chat_time", ""), 80),
+                speaker=_markdown_cell(message.get("speaker", ""), 80),
+                event=_markdown_cell(message.get("content", ""), 500),
+                frame=_markdown_cell(message.get("frame", ""), 80),
+                screen_time=_markdown_cell(message.get("timestamp_hms", ""), 80),
             )
         )
+    if not messages:
+        lines.append("| 1 | 需人工确认 | 需人工确认 | 未能从 OCR 中稳定抽取聊天条目 |  |  |")
 
     lines.extend(
         [
@@ -834,16 +1029,32 @@ def cmd_ocr_index(args: argparse.Namespace) -> None:
 
     out_dir = Path(args.export_dir).expanduser().resolve()
     records = _records_for_ocr(out_dir, args.scope)
-    max_workers = max(1, int(args.jobs or 1))
+    cached = {} if bool(args.refresh) else _cached_ocr_records(out_dir)
+    to_process: List[dict] = []
     processed: List[dict] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(_ocr_single_record, record) for record in records]
-        for future in concurrent.futures.as_completed(futures):
-            processed.append(future.result())
+    for record in records:
+        frame_path = Path(record.get("frame_path", ""))
+        if frame_path.exists() and not record.get("sha256"):
+            record["sha256"] = _sha256_file(frame_path)
+        cache_key = (str(record.get("frame") or ""), str(record.get("sha256") or ""))
+        cached_record = cached.get(cache_key)
+        if cached_record:
+            processed.append({**record, **cached_record, "cache_status": "reused"})
+        else:
+            to_process.append(record)
+
+    max_workers = max(1, int(args.jobs or 1))
+    if to_process:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_ocr_single_record, record) for record in to_process]
+            for future in concurrent.futures.as_completed(futures):
+                processed.append(future.result())
     processed.sort(key=lambda item: (float(item.get("timestamp_sec", 0.0)), item.get("frame", "")))
     index_path, markdown_path = _write_ocr_outputs(out_dir, processed, args.scope)
     report_path = _write_local_analysis_report(out_dir, processed)
 
+    print(f"ocr_reused={len(processed) - len(to_process)}")
+    print(f"ocr_processed={len(to_process)}")
     print(str(out_dir))
     print(str(index_path))
     print(str(markdown_path))
@@ -1546,6 +1757,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("export_dir", help="Export directory produced by interval-pdf")
     p.add_argument("--scope", choices=["selected", "raw"], default="selected", help="OCR selected screenshots or raw extracted frames")
     p.add_argument("--jobs", type=int, default=2, help="Parallel OCR jobs (default: 2)")
+    p.add_argument("--refresh", action="store_true", help="Ignore existing OCR index and re-OCR every frame")
     p.add_argument("--cloud", choices=["off", "text-summary"], default="off", help="Optional cloud text-only enhancement")
     p.add_argument("--base-url", default="https://api.deepseek.com", help="OpenAI-compatible base URL")
     p.add_argument("--model", default="deepseek-chat", help="OpenAI-compatible model name")

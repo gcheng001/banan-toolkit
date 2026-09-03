@@ -5,6 +5,8 @@
 dist/
 *.bak-*
 Thumbs.db
+__pycache__/
+*.pyc
 
 # Local installed app bundles and support archives kept for launch/backup only.
 # Their bundled Electron/Node/native dependencies are third-party vendor payloads,
