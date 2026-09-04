@@ -361,6 +361,7 @@ class Controller(NSObject):
         self.wechat_cloud_model = WECHAT_DEFAULT_CLOUD_MODEL
         self.wechat_reuse_raw_only = False
         self.active_child_proc = None
+        self.task_status = {}
         self.last_evidence_dir = None
         self.compress_files = []
         self.compress_results = {}
@@ -820,7 +821,10 @@ class Controller(NSObject):
 
     @objc.python_method
     def _refresh_files(self):
+        status_map = getattr(self, "task_status", None)
         if not self.files:
+            if isinstance(status_map, dict):
+                status_map.clear()
             self.task_text.setString_("文件名\t状态\t进度\t耗时\n（暂无任务）")
             if hasattr(self, "wechat_task_text"):
                 rows = self.wechat_last_rows or ["视频文件\t状态\t选帧方式\t输出版本", "（暂无视频）"]
@@ -830,7 +834,11 @@ class Controller(NSObject):
         wechat_rows = ["当前视频\t状态\t选帧方式\t下一步"]
         for item in self.files[:200]:
             name = Path(item["path"]).name
-            rows.append(f"{name}\t排队中\t0%\t--:--")
+            info = status_map.get(item["path"]) if isinstance(status_map, dict) else None
+            if info:
+                rows.append(f"{name}\t{info['status']}\t{info['pct']}\t{info['elapsed']}")
+            else:
+                rows.append(f"{name}\t排队中\t0%\t--:--")
             cache_dir = self._wechat_video_cache_dir(Path(item["path"]), self._wechat_cache_interval())
             next_action = "可点重新导出" if any(cache_dir.glob("raw_*.*")) else "先点导出取证材料"
             wechat_rows.append(f"{name}\t已导入\t{self._wechat_stride_label()} / 缓存{self._wechat_cache_interval():g}秒\t{next_action}")
@@ -1161,6 +1169,24 @@ class Controller(NSObject):
         return
 
     @IBAction
+    def openHistory_(self, _sender):
+        target = Path.home() / "Desktop" / "VisionOCR_Output"
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            script = (
+                'tell application "Finder"\n'
+                "activate\n"
+                'open (POSIX file "%s" as alias)\n'
+                "end tell" % target
+            )
+            subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True, text=True, timeout=8,
+            )
+        except Exception as exc:
+            self._alert("历史记录", str(exc))
+
+    @IBAction
     def typeChanged_(self, sender):
         self.selected_type = TYPE_OPTIONS_GUI[sender.indexOfSelectedItem()][1]
 
@@ -1263,9 +1289,13 @@ class Controller(NSObject):
         if proc and proc.poll() is None:
             try:
                 proc.terminate()
+                proc.wait(timeout=5)
             except Exception:
-                pass
-        self.status_label.setStringValue_("已请求停止（当前文件后）")
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        self.status_label.setStringValue_("正在停止..." if proc and proc.poll() is None else "已停止")
 
 
     @IBAction
@@ -1849,18 +1879,15 @@ class Controller(NSObject):
 
     @objc.python_method
     def _timer_loop(self):
-        paused_time = 0.0
-        pause_start = None
+        elapsed = 0.0
+        last = time.time()
         while not self._timer_stop and self.is_running:
-            if self.is_paused and pause_start is None:
-                pause_start = time.time()
-            if not self.is_paused and pause_start is not None:
-                paused_time += time.time() - pause_start
-                pause_start = None
-            if self._start_time:
-                elapsed = int(time.time() - self._start_time - paused_time)
-                m, s = divmod(max(elapsed, 0), 60)
-                self._set_control_text(self.timer_label, f"{m:02d}:{s:02d}")
+            now = time.time()
+            if not self.is_paused:
+                elapsed += now - last
+            last = now
+            m, s = divmod(int(elapsed), 60)
+            self._set_control_text(self.timer_label, f"{m:02d}:{s:02d}")
             time.sleep(0.3)
 
     @objc.python_method
@@ -1946,34 +1973,78 @@ class Controller(NSObject):
             cmd, channel, tmp_dir = self._ocr_command_for_file(path, out)
             self.status_label.setStringValue_(f"处理中：{path.name}（{channel}）")
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            start_ts = time.time()
             base = idx / total
+            paused_secs = 0.0
+            pause_start = None
             while proc.poll() is None:
                 if self.should_stop:
                     proc.terminate()
+                    try:
+                        proc.wait(timeout=3)
+                    except Exception:
+                        proc.kill()
                     break
-                while self.is_paused and not self.should_stop:
+                if self.is_paused and not self.should_stop:
+                    if pause_start is None:
+                        pause_start = time.time()
+                    el = int(time.time() - start_ts - paused_secs)
+                    self.task_status[item["path"]] = {
+                        "status": "已暂停",
+                        "pct": f"{int((idx + 0.5) / total * 100)}%",
+                        "elapsed": f"{el // 60:02d}:{el % 60:02d}",
+                    }
+                    self._call_on_main(self._render_task_rows)
                     time.sleep(0.2)
+                    continue
+                if pause_start is not None:
+                    paused_secs += time.time() - pause_start
+                    pause_start = None
                 bump = min(base + (0.88 / total), (idx + 0.88) / total)
                 self.progress_bar.setValue_(bump)
                 self.pct_label.setStringValue_(f"{int(bump * 100)}%")
+                el = int(time.time() - start_ts - paused_secs)
+                self.task_status[item["path"]] = {
+                    "status": "处理中",
+                    "pct": f"{int((idx + 0.5) / total * 100)}%",
+                    "elapsed": f"{el // 60:02d}:{el % 60:02d}",
+                }
+                self._call_on_main(self._render_task_rows)
                 time.sleep(0.25)
             if channel == "wechat-ocr":
-                md = Path(tmp_dir) / "录屏取证初稿_OCR文字索引.md" if tmp_dir else None
-                report = Path(tmp_dir) / "聊天记录分析报告.md" if tmp_dir else None
-                if proc.returncode == 0 and md and md.exists():
-                    shutil.copy2(md, out)
-                    if report and report.exists():
-                        shutil.copy2(report, self.output_dir / report.name)
+                if self.should_stop:
+                    pass
                 else:
-                    self.status_label.setStringValue_(f"取证OCR未生成结果，降级 VisionOCR：{path.name}")
-                    subprocess.run([CLI, str(path), "--output", str(out), "--type", "wechat", "--layout", "plain", "--recognition-level", "accurate", "--engine", "ocr"], text=True, capture_output=True)
+                    md = Path(tmp_dir) / "录屏取证初稿_OCR文字索引.md" if tmp_dir else None
+                    report = Path(tmp_dir) / "聊天记录分析报告.md" if tmp_dir else None
+                    if proc.returncode == 0 and md and md.exists():
+                        shutil.copy2(md, out)
+                        if report and report.exists():
+                            shutil.copy2(report, self.output_dir / report.name)
+                    else:
+                        self.status_label.setStringValue_(f"取证OCR未生成结果，降级 VisionOCR：{path.name}")
+                        subprocess.run([CLI, str(path), "--output", str(out), "--type", "wechat", "--layout", "plain", "--recognition-level", "accurate", "--engine", "ocr"], text=True, capture_output=True)
             elif channel == "mineru":
-                if not self._finish_mineru_output(tmp_dir, out):
+                if self.should_stop or self._finish_mineru_output(tmp_dir, out):
+                    pass
+                else:
                     self.status_label.setStringValue_(f"MinerU未生成结果，降级 VisionOCR：{path.name}")
                     subprocess.run([CLI, str(path), "--output", str(out)], text=True, capture_output=True)
             elif proc.returncode not in (0, None) and channel.startswith("legalocr"):
                 self.status_label.setStringValue_(f"{channel}失败，降级 VisionOCR：{path.name}")
                 subprocess.run([CLI, str(path), "--output", str(out)], text=True, capture_output=True)
+            if self.should_stop and proc.returncode not in (0, None):
+                self.task_status[item["path"]] = {"status": "已停止", "pct": "--", "elapsed": "--:--"}
+            elif out.exists():
+                el = int(time.time() - start_ts - paused_secs)
+                self.task_status[item["path"]] = {
+                    "status": "完成",
+                    "pct": "100%",
+                    "elapsed": f"{el // 60:02d}:{el % 60:02d}",
+                }
+            else:
+                self.task_status[item["path"]] = {"status": "失败", "pct": "--", "elapsed": "--:--"}
+            self._call_on_main(self._render_task_rows)
             done = (idx + 1) / total
             self.progress_bar.setValue_(done)
             self.pct_label.setStringValue_(f"{int(done * 100)}%")
@@ -2149,7 +2220,43 @@ horizontal_rule:
             src = Path(item["path"])
             out = self.output_dir / f"{src.stem}.docx"
             self.status_label.setStringValue_(f"处理中：{src.name}")
-            subprocess.run([DOCX_CLI, str(src), "--type", self.selected_docx_type, "--config", config_path, "--output", str(out)], check=False)
+            start_ts = time.time()
+            proc = subprocess.Popen([DOCX_CLI, str(src), "--type", self.selected_docx_type, "--config", config_path, "--output", str(out)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.active_child_proc = proc
+            paused_secs = 0.0
+            pause_start = None
+            while proc.poll() is None:
+                if self.should_stop:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=3)
+                    except Exception:
+                        proc.kill()
+                    break
+                if self.is_paused and not self.should_stop:
+                    if pause_start is None:
+                        pause_start = time.time()
+                    el = int(time.time() - start_ts - paused_secs)
+                    self.task_status[item["path"]] = {"status": "已暂停", "pct": f"{int((idx + 0.5) / total * 100)}%", "elapsed": f"{el // 60:02d}:{el % 60:02d}"}
+                    self._call_on_main(self._render_task_rows)
+                    time.sleep(0.2)
+                    continue
+                if pause_start is not None:
+                    paused_secs += time.time() - pause_start
+                    pause_start = None
+                el = int(time.time() - start_ts - paused_secs)
+                self.task_status[item["path"]] = {"status": "处理中", "pct": f"{int((idx + 0.5) / total * 100)}%", "elapsed": f"{el // 60:02d}:{el % 60:02d}"}
+                self._call_on_main(self._render_task_rows)
+                time.sleep(0.25)
+            self.active_child_proc = None
+            if self.should_stop and proc.returncode not in (0, None):
+                self.task_status[item["path"]] = {"status": "已停止", "pct": "--", "elapsed": "--:--"}
+            elif out.exists():
+                el = int(time.time() - start_ts - paused_secs)
+                self.task_status[item["path"]] = {"status": "完成", "pct": "100%", "elapsed": f"{el // 60:02d}:{el % 60:02d}"}
+            else:
+                self.task_status[item["path"]] = {"status": "失败", "pct": "--", "elapsed": "--:--"}
+            self._call_on_main(self._render_task_rows)
             done = (idx + 1) / total
             self.progress_bar.setValue_(done)
             self.pct_label.setStringValue_(f"{int(done * 100)}%")
@@ -2659,6 +2766,24 @@ horizontal_rule:
                 self._alert("云端设置失败", str(exc))
                 return
         self._alert("云端设置已保存", f"base URL: {self.wechat_cloud_base_url}\nmodel: {self.wechat_cloud_model}")
+
+    @objc.python_method
+    def _render_task_rows(self):
+        if self.mode not in ("ocr", "docx"):
+            return
+        if not self.files:
+            self.task_text.setString_("文件名\t状态\t进度\t耗时\n（暂无任务）")
+            return
+        rows = ["文件名\t状态\t进度\t耗时"]
+        status_map = getattr(self, "task_status", None)
+        for item in self.files[:200]:
+            name = Path(item["path"]).name
+            info = status_map.get(item["path"]) if isinstance(status_map, dict) else None
+            if info:
+                rows.append(f"{name}\t{info['status']}\t{info['pct']}\t{info['elapsed']}")
+            else:
+                rows.append(f"{name}\t排队中\t0%\t--:--")
+        self.task_text.setString_("\n".join(rows))
 
     @objc.python_method
     def _finish_run(self):
