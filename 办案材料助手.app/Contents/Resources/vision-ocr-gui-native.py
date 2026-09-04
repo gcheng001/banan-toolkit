@@ -134,15 +134,18 @@ def _c(r, g, b, a=1.0):
 
 
 C_WHITE = _c(1.0, 1.0, 1.0)
-C_APP_BG = _c(0.965, 0.968, 0.972)
-C_HEADER_BG = _c(0.985, 0.985, 0.985)
-C_PANEL_BG = _c(0.982, 0.982, 0.982)
+C_APP_BG = _c(0.958, 0.962, 0.968)
+C_HEADER_BG = _c(0.952, 0.955, 0.961)
+C_PANEL_BG = _c(0.972, 0.974, 0.978)
+C_CARD_BG = _c(0.988, 0.989, 0.991)
 C_TEXT = _c(0.10, 0.10, 0.11)
 C_TEXT_STRONG = _c(0.03, 0.03, 0.035)
-C_DIM = _c(0.46, 0.47, 0.50)
-C_MUTED = _c(0.62, 0.63, 0.66)
-C_BORDER = _c(0.87, 0.87, 0.88)
-C_BORDER_SOFT = _c(0.92, 0.92, 0.93)
+C_DIM = _c(0.42, 0.43, 0.46)
+C_MUTED = _c(0.58, 0.59, 0.62)
+C_BORDER = _c(0.84, 0.845, 0.86)
+C_BORDER_SOFT = _c(0.898, 0.902, 0.914)
+C_ACCENT = _c(0.043, 0.369, 0.918)      # system-blue-like #0B5EEA
+C_ACCENT_SOFT = _c(0.902, 0.937, 0.996)
 C_BLUE_BG = C_APP_BG
 C_BLUE_ACCENT = _c(0.12, 0.16, 0.22)
 C_BLUE_ACCENT_LIGHT = _c(0.95, 0.97, 1.0)
@@ -242,6 +245,69 @@ def _center_in_parent(view, pin_top=True):
         mask |= PIN_TOP
     _resize(view, mask)
     return view
+
+
+def _dyn_color(light, dark):
+    """Return an NSColor that adapts to light/dark appearance (macOS 10.14+)."""
+    try:
+        return NSColor.colorWithName_dynamicColor_(None, NSColor.colorWithSRGBRed_green_blue_alpha_(*light))
+    except Exception:
+        pass
+    try:
+        def dyn(appr):
+            name = str(appr.bestMatchFromAppearancesWithNames_(["NSAppearanceNameAqua", "NSAppearanceNameDarkAqua"]) or "")
+            return NSColor.colorWithSRGBRed_green_blue_alpha_(*(dark if "Dark" in name else light))
+        return NSColor.dynamicColorWithProvider_(dyn)
+    except Exception:
+        return NSColor.colorWithSRGBRed_green_blue_alpha_(*light)
+
+
+def _seg_btn(symbol, fallback_title, x, y, w, h, target, action, tip=None):
+    """Square-ish toolbar button with SF Symbol image and text fallback."""
+    btn = NSButton.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
+    btn.setBezelStyle_(5)  # regular square, layer-friendly
+    btn.setFont_(_font(12, 0.35))
+    img = None
+    for call in (
+        lambda: NSImage.imageWithSystemSymbolName_accessibilityDescription_(symbol, tip or fallback_title),
+        lambda: NSImage.imageWithSystemSymbolName_accessibilityDescription_(symbol, None),
+    ):
+        try:
+            img = call()
+        except Exception:
+            img = None
+        if img is not None:
+            break
+    if img is not None:
+        cfg = NSImageSymbolConfiguration.configurationWithPointSize_weight_(13.0, 1.0)
+        img = img.imageWithSymbolConfiguration_(cfg)
+        btn.setImage_(img)
+        btn.setImagePosition_(2)  # image only
+    else:
+        btn.setTitle_(fallback_title)
+    if tip:
+        btn.setToolTip_(tip)
+    btn.setTarget_(target)
+    btn.setAction_(action)
+    btn.setBordered_(False)
+    btn.setWantsLayer_(True)
+    btn.layer().setCornerRadius_(6.0)
+    btn.setContentTintColor_(C_TEXT)
+    return btn
+
+
+def _group_card(parent, title, x, y_top_offset, w, h):
+    """Add a titled group card inside a left settings panel.
+    y_top_offset is measured from the panel's top edge downward."""
+    ph = parent.bounds().size.height
+    card = NSView.alloc().initWithFrame_(NSMakeRect(x, ph - y_top_offset - h, w, h))
+    _set_view_style(card, C_CARD_BG, C_BORDER_SOFT, 10)
+    _resize(card, FILL_WIDTH | PIN_TOP)
+    lbl = _label(title, 14, h - 26, w - 28, 16, size=11, weight=0.55, color=C_MUTED)
+    _resize(lbl, FILL_WIDTH | PIN_TOP)
+    card.addSubview_(lbl)
+    parent.addSubview_(card)
+    return card
 
 
 PIN_TOP = NSViewMinYMargin
@@ -399,7 +465,7 @@ class Controller(NSObject):
         )
         win.setTitle_("VisionOCR 办案助手")
         win.setAppearance_(NSAppearance.appearanceNamed_("NSAppearanceNameAqua"))
-        win.setMinSize_(NSMakeSize(1080, 800))
+        win.setMinSize_(NSMakeSize(1120, 720))
         self.window = win
         root = win.contentView()
 
@@ -407,35 +473,41 @@ class Controller(NSObject):
         _resize(self.sidebar, FILL_WIDTH | PIN_TOP)
         root.addSubview_(self.sidebar)
         _set_view_style(self.sidebar, C_HEADER_BG, C_BORDER_SOFT, 0)
+        win.setDelegate_(self)
 
-        self.brand_icon = _label("V", 46, 25, 24, 24, size=19, weight=0.75, color=C_TEXT_STRONG)
-        self.brand_title = _label("办案材料助手", 82, 27, 140, 22, size=15, weight=0.55, color=C_TEXT_STRONG)
+        self.brand_icon = _label("V", 22, 25, 24, 24, size=19, weight=0.75, color=C_TEXT_STRONG)
+        self.brand_title = _label("办案材料助手", 54, 27, 140, 22, size=15, weight=0.55, color=C_TEXT_STRONG)
         self.sidebar.addSubview_(self.brand_icon)
         self.sidebar.addSubview_(self.brand_title)
 
-        self.nav_ocr = _nav_btn("▣ 材料转 MD", 250, 20, 118, 34, self, "switchToOCR:")
-        self.nav_docx = _nav_btn("▤ 转 Word", 390, 20, 108, 34, self, "switchToDOCX:")
-        self.nav_wechat = _nav_btn("◉ 录屏取证", 520, 20, 116, 34, self, "switchToWeChat:")
-        self.nav_compress = _nav_btn("◆ 图片压缩", 660, 20, 116, 34, self, "switchToCompress:")
-        self.sidebar.addSubview_(self.nav_ocr)
-        self.sidebar.addSubview_(self.nav_docx)
-        self.sidebar.addSubview_(self.nav_wechat)
-        self.sidebar.addSubview_(self.nav_compress)
+        nav_w, nav_h, nav_gap = 112, 36, 6
+        nav_specs = [("材料转 MD", "switchToOCR:"), ("转 Word", "switchToDOCX:"),
+                     ("录屏取证", "switchToWeChat:"), ("图片压缩", "switchToCompress:")]
+        group_w = 4 * nav_w + 3 * nav_gap
+        nav_x = int((width - group_w) / 2)
+        nav_y = int((topbar_h - nav_h) / 2)
+        self._nav_group_w = group_w
+        self._nav_btns = []
+        for i, (lbl, act) in enumerate(nav_specs):
+            b = _nav_btn(lbl, nav_x + i * (nav_w + nav_gap), nav_y, nav_w, nav_h, self, act)
+            b.setBezelStyle_(5)
+            b.setBordered_(False)
+            b.setWantsLayer_(True)
+            b.layer().setCornerRadius_(8.0)
+            b.setFont_(_font(13, 0.35))
+            _resize(b, NSViewMinXMargin | NSViewMaxXMargin)
+            self.sidebar.addSubview_(b)
+            self._nav_btns.append(b)
+        self.nav_ocr, self.nav_docx, self.nav_wechat, self.nav_compress = self._nav_btns
 
-        self.nav_ocr_bar = NSView.alloc().initWithFrame_(NSMakeRect(260, 0, 98, 3))
-        self.nav_docx_bar = NSView.alloc().initWithFrame_(NSMakeRect(404, 0, 78, 3))
-        self.nav_wechat_bar = NSView.alloc().initWithFrame_(NSMakeRect(534, 0, 84, 3))
-        self.nav_compress_bar = NSView.alloc().initWithFrame_(NSMakeRect(670, 0, 96, 3))
-        for bar in (self.nav_ocr_bar, self.nav_docx_bar, self.nav_wechat_bar, self.nav_compress_bar):
-            _fill_view(bar, C_TEXT_STRONG)
-            self.sidebar.addSubview_(bar)
-
-        self.btn_history = _btn("◷ 历史记录", width - 238, 22, 104, 30, self, "openHistory:")
-        self.btn_feedback = _btn("○ 反馈", width - 122, 22, 76, 30, self, "noop:")
-        _resize(self.btn_history, PIN_RIGHT)
+        self.btn_feedback = _seg_btn("questionmark.circle", "反馈", width - 56, 21, 34, 32, self, "noop:", tip="反馈")
+        self.btn_history = _seg_btn("clock.arrow.circlepath", "历史", width - 98, 21, 34, 32, self, "openHistory:", tip="历史记录")
         _resize(self.btn_feedback, PIN_RIGHT)
-        self.sidebar.addSubview_(self.btn_history)
+        _resize(self.btn_history, PIN_RIGHT)
         self.sidebar.addSubview_(self.btn_feedback)
+        self.sidebar.addSubview_(self.btn_history)
+
+        self._relayout_topbar()
 
         main_h = height - topbar_h
         self.main = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, main_h))
@@ -443,8 +515,8 @@ class Controller(NSObject):
         root.addSubview_(self.main)
         _fill_view(self.main, C_APP_BG)
 
-        self.page_title = _label("材料转 MD", 48, main_h - 40, 160, 24, size=15, weight=0.65, color=C_TEXT_STRONG)
-        self.page_subtitle = _label("将案卷 PDF、图片、Office 文档转为可检索 Markdown", 184, main_h - 40, 520, 24, size=13, color=C_DIM)
+        self.page_title = _label("材料转 MD", 22, main_h - 40, 160, 24, size=16, weight=0.65, color=C_TEXT_STRONG)
+        self.page_subtitle = _label("将案卷 PDF、图片、Office 文档转为可检索 Markdown", 170, main_h - 39, 520, 22, size=12.5, color=C_DIM)
         _resize(self.page_title, PIN_TOP)
         _resize(self.page_subtitle, PIN_TOP | FILL_WIDTH)
         self.main.addSubview_(self.page_title)
@@ -453,21 +525,25 @@ class Controller(NSObject):
         self.bottom = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, bottom_h))
         _resize(self.bottom, FILL_WIDTH | PIN_BOTTOM)
         self.main.addSubview_(self.bottom)
-        _set_view_style(self.bottom, C_WHITE, C_BORDER, 0)
-        self.status_label = _label("已就绪", 48, 22, 260, 20, size=13, color=C_DIM)
+        _set_view_style(self.bottom, C_HEADER_BG, C_BORDER, 0)
+        self.status_label = _label("已就绪", 22, 21, 300, 20, size=12.5, color=C_DIM)
+        _resize(self.status_label, FILL_WIDTH)
         self.bottom.addSubview_(self.status_label)
-        self.progress_bar = ProgressBar.alloc().initWithFrame_(NSMakeRect(430, 25, 260, 7))
-        self.bottom.addSubview_(self.progress_bar)
-        self.pct_label = _label("0%", 700, 18, 44, 20, size=13, weight=0.45)
-        self.timer_label = _label("00:00", 758, 18, 72, 20, size=13, color=C_DIM)
+        self.pct_label = _label("0%", 700, 19, 44, 20, size=12, weight=0.45)
+        self.timer_label = _label("00:00", 750, 19, 66, 20, size=12, color=C_DIM)
         _resize(self.pct_label, PIN_RIGHT)
         _resize(self.timer_label, PIN_RIGHT)
         self.bottom.addSubview_(self.pct_label)
         self.bottom.addSubview_(self.timer_label)
-        self.btn_clear = _btn("清空", 846, 13, 78, 30, self, "clearList:")
-        self.btn_pause = _btn("暂停", 932, 13, 78, 30, self, "pauseProcessing:")
-        self.btn_stop = _btn("停止", 1018, 13, 78, 30, self, "stopProcessing:")
-        self.btn_start = _btn("开始转换", 1108, 13, 116, 30, self, "startProcessing:")
+        self.progress_bar = ProgressBar.alloc().initWithFrame_(NSMakeRect(340, 26, 340, 6))
+        _resize(self.progress_bar, FILL_WIDTH)
+        self.bottom.addSubview_(self.progress_bar)
+        self.btn_clear = _seg_btn("trash", "清空", width - 296, 13, 32, 30, self, "clearList:", tip="清空队列")
+        self.btn_pause = _seg_btn("pause.fill", "暂停", width - 258, 13, 32, 30, self, "pauseProcessing:", tip="暂停")
+        self.btn_stop = _seg_btn("stop.fill", "停止", width - 220, 13, 32, 30, self, "stopProcessing:", tip="停止")
+        self.btn_start = _btn("开始转换", width - 176, 12, 154, 32, self, "startProcessing:")
+        self.btn_start.setBezelStyle_(1)
+        self.btn_start.setFont_(_font(13, 0.5))
         for btn in (self.btn_clear, self.btn_pause, self.btn_stop, self.btn_start):
             _resize(btn, PIN_RIGHT)
         self.btn_pause.setEnabled_(False)
@@ -476,6 +552,7 @@ class Controller(NSObject):
         self.bottom.addSubview_(self.btn_pause)
         self.bottom.addSubview_(self.btn_stop)
         self.bottom.addSubview_(self.btn_start)
+        self._style_start_primary(self.btn_start)
 
         body_h = main_h - header_h - bottom_h
         self.ocr_page = NSView.alloc().initWithFrame_(NSMakeRect(0, bottom_h, width, body_h))
@@ -509,51 +586,54 @@ class Controller(NSObject):
         _set_view_style(left, C_WHITE, C_BORDER, 12)
         self.ocr_page.addSubview_(left)
 
-        left.addSubview_(_label("转换设置", 18, left.bounds().size.height - 38, 200, 24, size=15, weight=0.65, color=C_TEXT_STRONG))
-        left.addSubview_(_label("文件类型", 18, left.bounds().size.height - 70, 120, 18, size=12, color=C_DIM))
-        self.type_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 98, 284, 28), False)
+        card1 = _group_card(left, "转换设置", 14, 16, 292, 316)
+
+        card1.addSubview_(_label("文件类型", 14, card1.bounds().size.height - 52, 120, 18, size=12, color=C_DIM))
+        self.type_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(14, card1.bounds().size.height - 80, 264, 28), False)
         for lbl, _ in TYPE_OPTIONS_GUI:
             self.type_popup.addItemWithTitle_(lbl)
         self.type_popup.setTarget_(self)
         self.type_popup.setAction_("typeChanged:")
-        left.addSubview_(self.type_popup)
+        card1.addSubview_(self.type_popup)
 
-        left.addSubview_(_label("并发数", 18, left.bounds().size.height - 132, 120, 18, size=12, color=C_DIM))
-        self.jobs_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 160, 284, 28), False)
+        card1.addSubview_(_label("并发数", 14, card1.bounds().size.height - 114, 120, 18, size=12, color=C_DIM))
+        self.jobs_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(14, card1.bounds().size.height - 142, 264, 28), False)
         for opt in ["1", "2", "3", "4"]:
             self.jobs_popup.addItemWithTitle_(opt)
         self.jobs_popup.selectItemAtIndex_(1)
         self.jobs_popup.setTarget_(self)
         self.jobs_popup.setAction_("jobsChanged:")
-        left.addSubview_(self.jobs_popup)
+        card1.addSubview_(self.jobs_popup)
 
-        left.addSubview_(_label("OCR / Whisper 模型", 18, left.bounds().size.height - 194, 160, 18, size=12, color=C_DIM))
-        self.whisper_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 222, 284, 28), False)
+        card1.addSubview_(_label("OCR / Whisper 模型", 14, card1.bounds().size.height - 176, 160, 18, size=12, color=C_DIM))
+        self.whisper_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(14, card1.bounds().size.height - 204, 264, 28), False)
         for opt in ["base（快）", "small", "medium", "large（准）"]:
             self.whisper_popup.addItemWithTitle_(opt)
         self.whisper_popup.setTarget_(self)
         self.whisper_popup.setAction_("whisperChanged:")
-        left.addSubview_(self.whisper_popup)
+        card1.addSubview_(self.whisper_popup)
 
-        left.addSubview_(_label("识别引擎", 18, left.bounds().size.height - 256, 160, 18, size=12, color=C_DIM))
-        self.ocr_engine_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 284, 284, 28), False)
+        card1.addSubview_(_label("识别引擎", 14, card1.bounds().size.height - 238, 160, 18, size=12, color=C_DIM))
+        self.ocr_engine_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(14, card1.bounds().size.height - 266, 264, 28), False)
         for opt in ["本地 MinerU（默认）", "Apple VisionOCR", "legal-ocr 自动", "legal-ocr MinerU", "PaddleOCR-VL（需配置）"]:
             self.ocr_engine_popup.addItemWithTitle_(opt)
         self.ocr_engine_popup.setTarget_(self)
         self.ocr_engine_popup.setAction_("ocrEngineChanged:")
-        left.addSubview_(self.ocr_engine_popup)
+        card1.addSubview_(self.ocr_engine_popup)
 
-        left.addSubview_(_label("输出目录", 18, left.bounds().size.height - 326, 100, 18, size=12, color=C_DIM))
-        self.out_path_ocr = _input_field(18, left.bounds().size.height - 354, 252, 28)
+        card2 = _group_card(left, "输出", 14, 348, 292, 84)
+        card2.addSubview_(_label("输出目录", 14, card2.bounds().size.height - 52, 100, 18, size=12, color=C_DIM))
+        self.out_path_ocr = _input_field(14, card2.bounds().size.height - 84, 224, 28)
         self.out_path_ocr.setStringValue_(str(self.output_dir).replace(str(Path.home()), "~"))
-        left.addSubview_(self.out_path_ocr)
-        self.btn_out_ocr = _btn("📁", 274, left.bounds().size.height - 354, 28, 28, self, "pickOutputDir:")
-        left.addSubview_(self.btn_out_ocr)
+        card2.addSubview_(self.out_path_ocr)
+        self.btn_out_ocr = _seg_btn("folder", "📁", 248, card2.bounds().size.height - 84, 30, 28, self, "pickOutputDir:", tip="选择目录")
+        card2.addSubview_(self.btn_out_ocr)
 
-        self.btn_start_left_ocr = _btn("▶  转为 Markdown", 18, 14, 284, 34, self, "startProcessing:")
+        self.btn_start_left_ocr = _btn("转为 Markdown", 18, 14, 284, 36, self, "startProcessing:")
         _resize(self.btn_start_left_ocr, PIN_BOTTOM)
         left.addSubview_(self.btn_start_left_ocr)
-        self.btn_evidence_left_ocr = _btn("证据整理", 18, 54, 284, 30, self, "organizeEvidence:")
+        self._style_start_primary(self.btn_start_left_ocr)
+        self.btn_evidence_left_ocr = _btn("证据整理", 18, 58, 284, 30, self, "organizeEvidence:")
         _resize(self.btn_evidence_left_ocr, PIN_BOTTOM)
         left.addSubview_(self.btn_evidence_left_ocr)
         _set_view_style(self.btn_evidence_left_ocr, C_WHITE, C_BORDER, 8)
@@ -622,77 +702,79 @@ class Controller(NSObject):
         _set_view_style(left, C_WHITE, C_BORDER, 12)
         self.docx_page.addSubview_(left)
 
-        left.addSubview_(_label("输入方式", 18, left.bounds().size.height - 36, 120, 22, size=15, weight=0.65, color=C_TEXT_STRONG))
-        self.input_mode = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 66, 284, 28), False)
+        card1 = _group_card(left, "输入方式", 14, 16, 292, 200)
+        self.input_mode = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(14, card1.bounds().size.height - 56, 264, 28), False)
         self.input_mode.addItemWithTitle_("文件导入")
         self.input_mode.addItemWithTitle_("文本粘贴")
         self.input_mode.selectItemAtIndex_(0)
-        left.addSubview_(self.input_mode)
+        card1.addSubview_(self.input_mode)
 
-        self.docx_drop = DropZone.alloc().initWithFrame_controller_(NSMakeRect(18, left.bounds().size.height - 188, 284, 104), self)
-        left.addSubview_(self.docx_drop)
+        self.docx_drop = DropZone.alloc().initWithFrame_controller_(NSMakeRect(14, 14, 264, 104), self)
+        card1.addSubview_(self.docx_drop)
         self.docx_drop.addSubview_(_register_file_drag(_label("拖入 Markdown 文件", 57, 58, 170, 24, size=14, weight=0.55, align=2)))
         self.docx_drop.addSubview_(_register_file_drag(_label("支持 .md / .txt", 42, 38, 200, 20, size=12, color=C_DIM, align=2)))
         self.btn_pick_docx = _btn("选择文件", 96, 10, 96, 26, self, "selectFiles:")
         self.docx_drop.addSubview_(_register_file_drag(self.btn_pick_docx))
 
-        left.addSubview_(_label("输出设置", 18, left.bounds().size.height - 216, 120, 22, size=15, weight=0.65, color=C_TEXT_STRONG))
-        left.addSubview_(_label("输出目录", 18, left.bounds().size.height - 242, 120, 18, size=12, color=C_DIM))
-        self.out_path_docx = _input_field(18, left.bounds().size.height - 270, 252, 28)
+        card2 = _group_card(left, "输出设置", 14, 232, 292, 84)
+        card2.addSubview_(_label("输出目录", 14, card2.bounds().size.height - 52, 120, 18, size=12, color=C_DIM))
+        self.out_path_docx = _input_field(14, card2.bounds().size.height - 84, 224, 28)
         self.out_path_docx.setStringValue_(str(self.output_dir).replace(str(Path.home()), "~"))
-        left.addSubview_(self.out_path_docx)
-        self.btn_out_docx = _btn("📁", 274, left.bounds().size.height - 270, 28, 28, self, "pickOutputDir:")
-        left.addSubview_(self.btn_out_docx)
+        card2.addSubview_(self.out_path_docx)
+        self.btn_out_docx = _seg_btn("folder", "📁", 248, card2.bounds().size.height - 84, 30, 28, self, "pickOutputDir:", tip="选择目录")
+        card2.addSubview_(self.btn_out_docx)
 
-        left.addSubview_(_label("页面设置", 18, left.bounds().size.height - 300, 120, 18, size=12, color=C_DIM))
-        self.page_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 328, 136, 28), False)
+        card3 = _group_card(left, "页面与排版", 14, 332, 292, 280)
+        card3.addSubview_(_label("页面设置", 14, card3.bounds().size.height - 52, 120, 18, size=12, color=C_DIM))
+        self.page_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(14, card3.bounds().size.height - 80, 128, 28), False)
         self.page_popup.addItemWithTitle_("A4（标准）")
         self.page_popup.addItemWithTitle_("A3")
         self.page_popup.addItemWithTitle_("Letter")
-        left.addSubview_(self.page_popup)
-        self.margin_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(166, left.bounds().size.height - 328, 136, 28), False)
+        card3.addSubview_(self.page_popup)
+        self.margin_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(150, card3.bounds().size.height - 80, 128, 28), False)
         self.margin_popup.addItemWithTitle_("标准（2.54cm）")
         self.margin_popup.addItemWithTitle_("窄")
         self.margin_popup.addItemWithTitle_("宽")
-        left.addSubview_(self.margin_popup)
+        card3.addSubview_(self.margin_popup)
 
-        left.addSubview_(_label("段落", 18, left.bounds().size.height - 360, 120, 18, size=12, color=C_DIM))
-        self.first_indent_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 388, 136, 28), False)
+        card3.addSubview_(_label("段落", 14, card3.bounds().size.height - 112, 120, 18, size=12, color=C_DIM))
+        self.first_indent_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(14, card3.bounds().size.height - 140, 128, 28), False)
         for opt in ["首行 2 字符", "无缩进", "首行 4 字符"]:
             self.first_indent_popup.addItemWithTitle_(opt)
-        left.addSubview_(self.first_indent_popup)
-        self.line_spacing_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(166, left.bounds().size.height - 388, 136, 28), False)
+        card3.addSubview_(self.first_indent_popup)
+        self.line_spacing_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(150, card3.bounds().size.height - 140, 128, 28), False)
         for opt in ["1.5 倍行距", "1.0 倍行距", "1.15 倍行距", "2.0 倍行距"]:
             self.line_spacing_popup.addItemWithTitle_(opt)
-        left.addSubview_(self.line_spacing_popup)
+        card3.addSubview_(self.line_spacing_popup)
 
-        left.addSubview_(_label("字体", 18, left.bounds().size.height - 420, 120, 18, size=12, color=C_DIM))
-        self.font_preset_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 448, 284, 28), False)
+        card3.addSubview_(_label("字体", 14, card3.bounds().size.height - 172, 120, 18, size=12, color=C_DIM))
+        self.font_preset_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(14, card3.bounds().size.height - 200, 264, 28), False)
         for opt in ["法律文书默认", "法院常用", "通用宋体", "屏幕友好"]:
             self.font_preset_popup.addItemWithTitle_(opt)
-        left.addSubview_(self.font_preset_popup)
+        card3.addSubview_(self.font_preset_popup)
 
-        left.addSubview_(_label("标题字体 / 正文字体", 18, left.bounds().size.height - 480, 160, 18, size=12, color=C_DIM))
-        self.title_font_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 508, 136, 28), False)
+        card3.addSubview_(_label("标题字体 / 正文字体", 14, card3.bounds().size.height - 232, 160, 18, size=12, color=C_DIM))
+        self.title_font_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(14, card3.bounds().size.height - 260, 128, 28), False)
         for opt in ["黑体", "宋体", "仿宋", "微软雅黑"]:
             self.title_font_popup.addItemWithTitle_(opt)
-        left.addSubview_(self.title_font_popup)
-        self.body_font_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(166, left.bounds().size.height - 508, 136, 28), False)
+        card3.addSubview_(self.title_font_popup)
+        self.body_font_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(150, card3.bounds().size.height - 260, 128, 28), False)
         for opt in ["仿宋", "宋体", "微软雅黑", "苹方"]:
             self.body_font_popup.addItemWithTitle_(opt)
-        left.addSubview_(self.body_font_popup)
+        card3.addSubview_(self.body_font_popup)
 
-        left.addSubview_(_label("标题字号 / 正文字号", 18, left.bounds().size.height - 536, 160, 18, size=12, color=C_DIM))
-        self.title_size_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 564, 136, 28), False)
+        card4 = _group_card(left, "字号", 14, 628, 292, 66)
+        card4.addSubview_(_label("标题字号 / 正文字号", 14, card4.bounds().size.height - 42, 160, 16, size=12, color=C_DIM))
+        self.title_size_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(14, 8, 128, 28), False)
         for opt in ["15 pt", "16 pt", "18 pt", "22 pt"]:
             self.title_size_popup.addItemWithTitle_(opt)
-        left.addSubview_(self.title_size_popup)
-        self.body_size_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(166, left.bounds().size.height - 564, 136, 28), False)
+        card4.addSubview_(self.title_size_popup)
+        self.body_size_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(150, 8, 128, 28), False)
         for opt in ["12 pt", "10.5 pt", "14 pt", "16 pt"]:
             self.body_size_popup.addItemWithTitle_(opt)
-        left.addSubview_(self.body_size_popup)
+        card4.addSubview_(self.body_size_popup)
 
-        self.btn_start_left_docx = _btn("⇄  开始转换", 18, 14, 284, 34, self, "startProcessing:")
+        self.btn_start_left_docx = _btn("开始转换", 18, 14, 284, 36, self, "startProcessing:")
         _resize(self.btn_start_left_docx, PIN_BOTTOM)
         left.addSubview_(self.btn_start_left_docx)
         self.btn_start_left_docx.setHidden_(True)
@@ -730,6 +812,32 @@ class Controller(NSObject):
         preview_scroll.setDocumentView_(self.word_preview)
         _set_view_style(preview_scroll, C_WHITE, C_BORDER, 10)
         right.addSubview_(preview_scroll)
+
+    @objc.python_method
+    def _style_start_primary(self, btn):
+        try:
+            btn.setBezelColor_(C_ACCENT)
+            btn.setContentTintColor_(NSColor.whiteColor())
+        except Exception:
+            pass
+
+    @objc.python_method
+    def _relayout_topbar(self):
+        """Keep the nav button group horizontally centered in the top bar."""
+        try:
+            sw = self.sidebar.bounds().size.width
+            sh = self.sidebar.bounds().size.height
+            group_w = getattr(self, "_nav_group_w", 466)
+            nav_x = int((sw - group_w) / 2)
+            nav_w, nav_h, nav_gap = 112, 36, 6
+            nav_y = int((sh - nav_h) / 2)
+            for i, b in enumerate(getattr(self, "_nav_btns", [])):
+                b.setFrame_(NSMakeRect(nav_x + i * (nav_w + nav_gap), nav_y, nav_w, nav_h))
+        except Exception:
+            pass
+
+    def windowDidResize_(self, _notification):
+        self._relayout_topbar()
 
     @objc.python_method
     def _apply_theme(self):
@@ -780,24 +888,17 @@ class Controller(NSObject):
         else:
             self.btn_start.setTarget_(self)
             self.btn_start.setAction_("startProcessing:")
-        self.btn_start_left_ocr.setTitle_("▶  转为 Markdown")
-        self.btn_start_left_docx.setTitle_("⇄  开始转换")
+        self.btn_start_left_ocr.setTitle_("转为 Markdown")
+        self.btn_start_left_docx.setTitle_("开始转换")
+        self._style_start_primary(self.btn_start)
 
-        _set_view_style(self.nav_ocr, C_WHITE if self.mode == "ocr" else C_HEADER_BG, C_BORDER if self.mode == "ocr" else C_HEADER_BG, 8)
-        _set_view_style(self.nav_docx, C_WHITE if self.mode == "docx" else C_HEADER_BG, C_BORDER if self.mode == "docx" else C_HEADER_BG, 8)
-        _set_view_style(self.nav_wechat, C_WHITE if self.mode == "wechat" else C_HEADER_BG, C_BORDER if self.mode == "wechat" else C_HEADER_BG, 8)
-        _set_view_style(self.nav_compress, C_WHITE if self.mode == "compress" else C_HEADER_BG, C_BORDER if self.mode == "compress" else C_HEADER_BG, 8)
-        self.nav_ocr.setContentTintColor_(C_TEXT_STRONG if self.mode == "ocr" else C_DIM)
-        self.nav_docx.setContentTintColor_(C_TEXT_STRONG if self.mode == "docx" else C_DIM)
-        self.nav_wechat.setContentTintColor_(C_TEXT_STRONG if self.mode == "wechat" else C_DIM)
-        self.nav_ocr_bar.setHidden_(self.mode != "ocr")
-        self.nav_docx_bar.setHidden_(self.mode != "docx")
-        self.nav_wechat_bar.setHidden_(self.mode != "wechat")
-        self.nav_compress.setContentTintColor_(C_TEXT_STRONG if self.mode == "compress" else C_DIM)
-        self.nav_ocr_bar.setHidden_(self.mode != "ocr")
-        self.nav_docx_bar.setHidden_(self.mode != "docx")
-        self.nav_wechat_bar.setHidden_(self.mode != "wechat")
-        self.nav_compress_bar.setHidden_(self.mode != "compress")
+        mode_map = {"ocr": self.nav_ocr, "docx": self.nav_docx, "wechat": self.nav_wechat, "compress": self.nav_compress}
+        for key, btn in mode_map.items():
+            active = (self.mode == key)
+            btn.layer().setBackgroundColor_((C_WHITE if active else C_HEADER_BG).CGColor())
+            btn.layer().setBorderWidth_(1.0 if active else 0.0)
+            btn.layer().setBorderColor_(C_BORDER.CGColor())
+            btn.setContentTintColor_(C_TEXT_STRONG if active else C_DIM)
         if hasattr(self, "compress_page"):
             self.compress_page.setHidden_(self.mode != "compress")
         if hasattr(self, "wechat_page"):
@@ -924,68 +1025,70 @@ class Controller(NSObject):
         _set_view_style(left, C_WHITE, C_BORDER, 12)
         self.compress_page.addSubview_(left)
 
-        left.addSubview_(_label("\u538b\u7f29\u8bbe\u7f6e", 18, left.bounds().size.height - 36, 160, 22, size=15, weight=0.65, color=C_TEXT_STRONG))
+        card1 = _group_card(left, "压缩设置", 14, 16, 292, 318)
 
-        left.addSubview_(_label("\u4f7f\u7528\u573a\u666f", 18, left.bounds().size.height - 66, 120, 18, size=12, color=C_DIM))
-        self.compress_preset_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 94, 284, 28), False)
+        card1.addSubview_(_label("使用场景", 14, card1.bounds().size.height - 52, 120, 18, size=12, color=C_DIM))
+        self.compress_preset_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(14, card1.bounds().size.height - 80, 264, 28), False)
         for lbl in IMAGE_COMPRESS_PRESET_LABELS:
             self.compress_preset_popup.addItemWithTitle_(lbl)
         self.compress_preset_popup.selectItemAtIndex_(self.compress_preset_idx)
         self.compress_preset_popup.setTarget_(self)
         self.compress_preset_popup.setAction_("compressPresetChanged:")
-        left.addSubview_(self.compress_preset_popup)
+        card1.addSubview_(self.compress_preset_popup)
 
-        left.addSubview_(_label("\u76ee\u6807\u5927\u5c0f\uff08KB\uff09", 18, left.bounds().size.height - 128, 140, 18, size=12, color=C_DIM))
-        self.compress_target_field = _input_field(18, left.bounds().size.height - 156, 184, 28, placeholder="200")
+        card1.addSubview_(_label("目标大小（KB）", 14, card1.bounds().size.height - 112, 140, 18, size=12, color=C_DIM))
+        self.compress_target_field = _input_field(14, card1.bounds().size.height - 140, 172, 28, placeholder="200")
         self.compress_target_field.setStringValue_(str(self.compress_target_kb))
-        left.addSubview_(self.compress_target_field)
-        left.addSubview_(_label("\u4ec5\u8bc1\u4ef6/\u5408\u89c4\u573a\u666f\u751f\u6548", 208, left.bounds().size.height - 156, 96, 28, size=11, color=C_DIM))
+        card1.addSubview_(self.compress_target_field)
+        card1.addSubview_(_label("仅证件/合规生效", 196, card1.bounds().size.height - 140, 82, 28, size=10, color=C_MUTED))
 
-        left.addSubview_(_label("\u8f93\u51fa\u683c\u5f0f", 18, left.bounds().size.height - 188, 120, 18, size=12, color=C_DIM))
-        self.compress_fmt_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 216, 136, 28), False)
+        card1.addSubview_(_label("输出格式", 14, card1.bounds().size.height - 172, 120, 18, size=12, color=C_DIM))
+        self.compress_fmt_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(14, card1.bounds().size.height - 200, 128, 28), False)
         for lbl in IMAGE_COMPRESS_FMT_LABELS:
             self.compress_fmt_popup.addItemWithTitle_(lbl)
         self.compress_fmt_popup.selectItemAtIndex_(self.compress_fmt_idx)
-        left.addSubview_(self.compress_fmt_popup)
+        card1.addSubview_(self.compress_fmt_popup)
         self.compress_fmt_popup.setTarget_(self)
         self.compress_fmt_popup.setAction_("compressFmtChanged:")
 
-        left.addSubview_(_label("\u753b\u8d28\u4e0a\u9650", 18, left.bounds().size.height - 244, 120, 18, size=12, color=C_DIM))
-        self.compress_q_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 272, 136, 28), False)
+        card1.addSubview_(_label("画质上限", 14, card1.bounds().size.height - 228, 120, 18, size=12, color=C_DIM))
+        self.compress_q_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(14, card1.bounds().size.height - 256, 128, 28), False)
         for lbl in IMAGE_COMPRESS_Q_LABELS:
             self.compress_q_popup.addItemWithTitle_(lbl)
         self.compress_q_popup.selectItemAtIndex_(self.compress_q_idx)
-        left.addSubview_(self.compress_q_popup)
+        card1.addSubview_(self.compress_q_popup)
         self.compress_q_popup.setTarget_(self)
         self.compress_q_popup.setAction_("compressQChanged:")
 
-        left.addSubview_(_label("\u6700\u957f\u8fb9", 162, left.bounds().size.height - 244, 120, 18, size=12, color=C_DIM))
-        self.compress_maxpx_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(162, left.bounds().size.height - 272, 140, 28), False)
+        card1.addSubview_(_label("最长边", 150, card1.bounds().size.height - 228, 120, 18, size=12, color=C_DIM))
+        self.compress_maxpx_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(150, card1.bounds().size.height - 256, 128, 28), False)
         for lbl in IMAGE_COMPRESS_MAXPX_LABELS:
             self.compress_maxpx_popup.addItemWithTitle_(lbl)
         self.compress_maxpx_popup.selectItemAtIndex_(self.compress_maxpx_idx)
-        left.addSubview_(self.compress_maxpx_popup)
+        card1.addSubview_(self.compress_maxpx_popup)
         self.compress_maxpx_popup.setTarget_(self)
         self.compress_maxpx_popup.setAction_("compressMaxPxChanged:")
 
-        self.compress_keep_chk = _checkbox("\u4fdd\u7559\u539f\u59cb\u6587\u4ef6\uff08\u9ed8\u8ba4\u5f00\uff09", 18, left.bounds().size.height - 304, 220, 22, checked=self.compress_keep_original)
-        left.addSubview_(self.compress_keep_chk)
-        self.compress_strip_chk = _checkbox("\u53bb\u9664 EXIF/\u5143\u6570\u636e\uff08\u9ed8\u8ba4\u5f00\uff09", 18, left.bounds().size.height - 330, 240, 22, checked=self.compress_strip_metadata)
-        left.addSubview_(self.compress_strip_chk)
+        self.compress_keep_chk = _checkbox("保留原始文件（默认开）", 14, card1.bounds().size.height - 288, 220, 22, checked=self.compress_keep_original)
+        card1.addSubview_(self.compress_keep_chk)
+        self.compress_strip_chk = _checkbox("去除 EXIF/元数据（默认开）", 14, card1.bounds().size.height - 312, 240, 22, checked=self.compress_strip_metadata)
+        card1.addSubview_(self.compress_strip_chk)
 
-        left.addSubview_(_label("\u8f93\u51fa\u76ee\u5f55", 18, left.bounds().size.height - 402, 140, 18, size=12, color=C_DIM))
-        self.out_path_compress = _input_field(18, left.bounds().size.height - 430, 252, 28)
+        card2 = _group_card(left, "输出", 14, 350, 292, 120)
+        card2.addSubview_(_label("输出目录", 14, card2.bounds().size.height - 52, 140, 18, size=12, color=C_DIM))
+        self.out_path_compress = _input_field(14, card2.bounds().size.height - 84, 224, 28)
         self.out_path_compress.setStringValue_(str(self.compress_output_dir).replace(str(Path.home()), "~"))
-        left.addSubview_(self.out_path_compress)
-        self.btn_out_compress = _btn("\U0001f4c1", 274, left.bounds().size.height - 430, 28, 28, self, "pickCompressOutputDir:")
-        left.addSubview_(self.btn_out_compress)
+        card2.addSubview_(self.out_path_compress)
+        self.btn_out_compress = _seg_btn("folder", "📁", 248, card2.bounds().size.height - 84, 30, 28, self, "pickCompressOutputDir:", tip="选择目录")
+        card2.addSubview_(self.btn_out_compress)
 
-        self.btn_open_compress_dir = _btn("\u6253\u5f00\u8f93\u51fa\u76ee\u5f55", 18, left.bounds().size.height - 466, 132, 28, self, "openCompressOutputDir:")
-        left.addSubview_(self.btn_open_compress_dir)
+        self.btn_open_compress_dir = _btn("打开输出目录", 14, card2.bounds().size.height - 118, 264, 26, self, "openCompressOutputDir:")
+        card2.addSubview_(self.btn_open_compress_dir)
 
-        self.btn_start_left_compress = _btn("\u25b6  \u5f00\u59cb\u538b\u7f29", 18, 14, 284, 34, self, "startCompress:")
+        self.btn_start_left_compress = _btn("开始压缩", 18, 14, 284, 36, self, "startCompress:")
         _resize(self.btn_start_left_compress, PIN_BOTTOM)
         left.addSubview_(self.btn_start_left_compress)
+        self._style_start_primary(self.btn_start_left_compress)
         _pin_panel_controls_to_top(left, (self.btn_start_left_compress,))
 
         right = NSView.alloc().initWithFrame_(NSMakeRect(356, 20, self.compress_page.bounds().size.width - 376, body_h - 40))
@@ -995,12 +1098,12 @@ class Controller(NSObject):
         self.compress_drop = DropZone.alloc().initWithFrame_controller_(NSMakeRect(0, right.bounds().size.height - 150, right.bounds().size.width, 150), self)
         _resize(self.compress_drop, FILL_WIDTH | PIN_TOP)
         right.addSubview_(self.compress_drop)
-        self.compress_drop.addSubview_(_register_file_drag(_label("\u62d6\u5165\u56fe\u7247\u6216\u70b9\u51fb\u9009\u62e9", right.bounds().size.width / 2 - 100, 88, 200, 22, size=15, weight=0.55, color=C_TEXT_STRONG, align=2)))
-        self.compress_drop.addSubview_(_register_file_drag(_label("\u652f\u6301 JPG / PNG / HEIC / TIFF / WebP", right.bounds().size.width / 2 - 130, 64, 260, 20, size=12, color=C_DIM, align=2)))
-        self.btn_pick_compress = _btn("\u9009\u62e9\u56fe\u7247", right.bounds().size.width / 2 - 44, 30, 88, 28, self, "selectCompressFiles:")
+        self.compress_drop.addSubview_(_register_file_drag(_label("拖入图片或点击选择", right.bounds().size.width / 2 - 100, 88, 200, 22, size=15, weight=0.55, color=C_TEXT_STRONG, align=2)))
+        self.compress_drop.addSubview_(_register_file_drag(_label("支持 JPG / PNG / HEIC / TIFF / WebP", right.bounds().size.width / 2 - 130, 64, 260, 20, size=12, color=C_DIM, align=2)))
+        self.btn_pick_compress = _btn("选择图片", right.bounds().size.width / 2 - 44, 30, 88, 28, self, "selectCompressFiles:")
         self.compress_drop.addSubview_(_register_file_drag(self.btn_pick_compress))
 
-        list_label = _label("\u538b\u7f29\u7ed3\u679c", 0, right.bounds().size.height - 180, 240, 22, size=14, weight=0.55, color=C_TEXT_STRONG)
+        list_label = _label("压缩结果", 0, right.bounds().size.height - 180, 240, 22, size=14, weight=0.55, color=C_TEXT_STRONG)
         _resize(list_label, PIN_TOP)
         right.addSubview_(list_label)
         list_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, right.bounds().size.width, right.bounds().size.height - 210))
@@ -1010,7 +1113,7 @@ class Controller(NSObject):
         _resize(self.compress_list_text, FILL_WIDTH | FILL_HEIGHT)
         self.compress_list_text.setEditable_(False)
         self.compress_list_text.setFont_(_font(13))
-        self.compress_list_text.setString_("\u62d6\u5165\u56fe\u7247\u540e\u70b9\u51fb\u201c\u5f00\u59cb\u538b\u7f29\u201d")
+        self.compress_list_text.setString_("拖入图片后点击“开始压缩”")
         list_scroll.setDocumentView_(self.compress_list_text)
         _set_view_style(list_scroll, C_WHITE, C_BORDER, 10)
         right.addSubview_(list_scroll)
@@ -2309,27 +2412,27 @@ horizontal_rule:
         _set_view_style(left, C_WHITE, C_BORDER, 12)
         self.wechat_page.addSubview_(left)
 
-        left.addSubview_(_label("取证设置", 18, left.bounds().size.height - 36, 120, 22, size=15, weight=0.65, color=C_TEXT_STRONG))
-        left.addSubview_(_label("处理模式", 18, left.bounds().size.height - 72, 120, 18, size=12, color=C_DIM))
-        self.wechat_mode_control = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 104, 284, 28), False)
+        card1 = _group_card(left, "取证设置", 14, 16, 292, 296)
+        card1.addSubview_(_label("处理模式", 14, card1.bounds().size.height - 52, 120, 18, size=12, color=C_DIM))
+        self.wechat_mode_control = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(14, card1.bounds().size.height - 84, 264, 28), False)
         self.wechat_mode_control.addItemWithTitle_("快速初稿")
         self.wechat_mode_control.addItemWithTitle_("OCR增强")
         self.wechat_mode_control.selectItemAtIndex_(0)
         self.wechat_mode_control.setTarget_(self)
         self.wechat_mode_control.setAction_("wechatModeChanged:")
-        left.addSubview_(self.wechat_mode_control)
+        card1.addSubview_(self.wechat_mode_control)
 
-        left.addSubview_(_label("原始缓存", 18, left.bounds().size.height - 132, 120, 18, size=12, color=C_DIM))
-        self.wechat_cache_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 160, 284, 28), False)
+        card1.addSubview_(_label("原始缓存", 14, card1.bounds().size.height - 112, 120, 18, size=12, color=C_DIM))
+        self.wechat_cache_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(14, card1.bounds().size.height - 140, 264, 28), False)
         for opt in ["0.5 秒/张（默认）", "0.25 秒/张（更细）", "1 秒/张（省空间）"]:
             self.wechat_cache_popup.addItemWithTitle_(opt)
         self.wechat_cache_popup.selectItemAtIndex_(0)
         self.wechat_cache_popup.setTarget_(self)
         self.wechat_cache_popup.setAction_("wechatStrideChanged:")
-        left.addSubview_(self.wechat_cache_popup)
+        card1.addSubview_(self.wechat_cache_popup)
 
-        left.addSubview_(_label("保留间隔", 18, left.bounds().size.height - 194, 120, 18, size=12, color=C_DIM))
-        self.wechat_stride_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 222, 284, 28), False)
+        card1.addSubview_(_label("保留间隔", 14, card1.bounds().size.height - 174, 120, 18, size=12, color=C_DIM))
+        self.wechat_stride_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(14, card1.bounds().size.height - 202, 264, 28), False)
         for opt in [
             "自动判断滚动速度",
             "每 0.5 秒留 1 张",
@@ -2350,42 +2453,43 @@ horizontal_rule:
             self.wechat_stride_popup.addItemWithTitle_(opt)
         self.wechat_stride_popup.setTarget_(self)
         self.wechat_stride_popup.setAction_("wechatStrideChanged:")
-        left.addSubview_(self.wechat_stride_popup)
+        card1.addSubview_(self.wechat_stride_popup)
 
-        left.addSubview_(_label("输出质量", 18, left.bounds().size.height - 256, 120, 18, size=12, color=C_DIM))
-        self.wechat_quality = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(18, left.bounds().size.height - 284, 284, 28), False)
+        card1.addSubview_(_label("输出质量", 14, card1.bounds().size.height - 236, 120, 18, size=12, color=C_DIM))
+        self.wechat_quality = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(14, card1.bounds().size.height - 264, 264, 28), False)
         for opt in ["清晰", "平衡", "体积"]:
             self.wechat_quality.addItemWithTitle_(opt)
         self.wechat_quality.selectItemAtIndex_(0)
-        left.addSubview_(self.wechat_quality)
+        card1.addSubview_(self.wechat_quality)
 
-        left.addSubview_(_label("选项", 18, 228, 120, 18, size=12, color=C_DIM))
-        self.wechat_keep_raw = _checkbox("保留原始缓存", 18, 202, 130, 22, True)
-        self.wechat_context_overlap = _checkbox("相邻页少量重复", 160, 202, 142, 22, True)
-        self.wechat_local_ocr = _checkbox("本地OCR优先", 18, 176, 130, 22, True)
-        self.wechat_candidate_ocr = _checkbox("候选页OCR", 160, 176, 130, 22, False)
-        self.wechat_cloud_ocr = _checkbox("手动云端整理", 18, 150, 140, 22, False)
-        self.wechat_preserve_head = _checkbox("开头详情页加密", 160, 150, 142, 22, False)
-        left.addSubview_(self.wechat_keep_raw)
-        left.addSubview_(self.wechat_context_overlap)
-        left.addSubview_(self.wechat_local_ocr)
-        left.addSubview_(self.wechat_candidate_ocr)
-        left.addSubview_(self.wechat_cloud_ocr)
-        left.addSubview_(self.wechat_preserve_head)
-        left.addSubview_(_btn("云端设置", 176, 224, 126, 26, self, "configureWeChatCloud:"))
+        card2 = _group_card(left, "选项", 14, 328, 292, 148)
+        self.wechat_keep_raw = _checkbox("保留原始缓存", 14, card2.bounds().size.height - 50, 130, 22, True)
+        self.wechat_context_overlap = _checkbox("相邻页少量重复", 152, card2.bounds().size.height - 50, 134, 22, True)
+        self.wechat_local_ocr = _checkbox("本地OCR优先", 14, card2.bounds().size.height - 76, 130, 22, True)
+        self.wechat_candidate_ocr = _checkbox("候选页OCR", 152, card2.bounds().size.height - 76, 130, 22, False)
+        self.wechat_cloud_ocr = _checkbox("手动云端整理", 14, card2.bounds().size.height - 102, 130, 22, False)
+        self.wechat_preserve_head = _checkbox("开头详情页加密", 152, card2.bounds().size.height - 102, 134, 22, False)
+        card2.addSubview_(self.wechat_keep_raw)
+        card2.addSubview_(self.wechat_context_overlap)
+        card2.addSubview_(self.wechat_local_ocr)
+        card2.addSubview_(self.wechat_candidate_ocr)
+        card2.addSubview_(self.wechat_cloud_ocr)
+        card2.addSubview_(self.wechat_preserve_head)
+        btn_cloud_cfg = _btn("云端设置", 152, 8, 126, 24, self, "configureWeChatCloud:")
+        card2.addSubview_(btn_cloud_cfg)
 
-        left.addSubview_(_label("输出目录", 18, 126, 100, 18, size=12, color=C_DIM))
-        self.out_path_wechat = _input_field(18, 96, 252, 28)
+        card3 = _group_card(left, "输出", 14, 492, 292, 86)
+        card3.addSubview_(_label("输出目录", 14, card3.bounds().size.height - 50, 100, 18, size=12, color=C_DIM))
+        self.out_path_wechat = _input_field(14, card3.bounds().size.height - 82, 224, 28)
         self.out_path_wechat.setStringValue_(str(self.wechat_output_dir).replace(str(Path.home()), "~"))
-        left.addSubview_(self.out_path_wechat)
-        self.btn_out_wechat = _btn("📁", 274, 96, 28, 28, self, "pickOutputDir:")
-        left.addSubview_(self.btn_out_wechat)
+        card3.addSubview_(self.out_path_wechat)
+        self.btn_out_wechat = _seg_btn("folder", "📁", 248, card3.bounds().size.height - 82, 30, 28, self, "pickOutputDir:", tip="选择目录")
+        card3.addSubview_(self.btn_out_wechat)
 
-        self.btn_start_left_wechat = _btn("导出取证材料", 18, 64, 284, 26, self, "startProcessing:")
+        self.btn_start_left_wechat = _btn("导出取证材料", 18, 64, 284, 32, self, "startProcessing:")
         _resize(self.btn_start_left_wechat, PIN_BOTTOM)
         left.addSubview_(self.btn_start_left_wechat)
-        _set_view_style(self.btn_start_left_wechat, C_PANEL_BG, C_BORDER, 8)
-        self.btn_start_left_wechat.setContentTintColor_(C_TEXT_STRONG)
+        self._style_start_primary(self.btn_start_left_wechat)
         self.btn_rerun_left_wechat = _btn("重新导出（复用截图）", 18, 34, 284, 26, self, "rerunWeChatExport:")
         _resize(self.btn_rerun_left_wechat, PIN_BOTTOM)
         left.addSubview_(self.btn_rerun_left_wechat)
@@ -2402,28 +2506,28 @@ horizontal_rule:
         _resize(right, FILL_WIDTH | FILL_HEIGHT)
         self.wechat_page.addSubview_(right)
 
-        self.wechat_drop = DropZone.alloc().initWithFrame_controller_(NSMakeRect(0, right.bounds().size.height - 230, right.bounds().size.width, 230), self)
+        self.wechat_drop = DropZone.alloc().initWithFrame_controller_(NSMakeRect(0, right.bounds().size.height - 214, right.bounds().size.width, 214), self)
         _resize(self.wechat_drop, FILL_WIDTH | PIN_TOP)
         right.addSubview_(self.wechat_drop)
-        wechat_title = _label("拖入聊天录屏", 0, 132, right.bounds().size.width, 30, size=17, weight=0.75, color=C_TEXT_STRONG, align=1)
-        wechat_subtitle = _label("MP4 / MOV / M4V，可批量处理", 0, 102, right.bounds().size.width, 22, size=13, color=C_DIM, align=1)
+        wechat_title = _label("拖入聊天录屏", 0, 118, right.bounds().size.width, 30, size=17, weight=0.75, color=C_TEXT_STRONG, align=1)
+        wechat_subtitle = _label("MP4 / MOV / M4V，可批量处理", 0, 90, right.bounds().size.width, 22, size=13, color=C_DIM, align=1)
         _resize(wechat_title, FILL_WIDTH | PIN_TOP)
         _resize(wechat_subtitle, FILL_WIDTH | PIN_TOP)
         self.wechat_drop.addSubview_(_register_file_drag(wechat_title))
         self.wechat_drop.addSubview_(_register_file_drag(wechat_subtitle))
-        self.btn_pick_wechat = _btn("选择录屏", right.bounds().size.width / 2 - 48, 72, 96, 32, self, "selectFiles:")
+        self.btn_pick_wechat = _btn("选择录屏", right.bounds().size.width / 2 - 48, 42, 96, 32, self, "selectFiles:")
         self.wechat_drop.addSubview_(_register_file_drag(_center_in_parent(self.btn_pick_wechat)))
         _set_view_style(self.btn_pick_wechat, C_WHITE, C_BORDER, 8)
         self.btn_pick_wechat.setContentTintColor_(C_TEXT_STRONG)
 
-        self.wechat_hint = _label("快速初稿本地处理；OCR增强默认仅在本机生成文字索引，只有勾选云端整理才发送文字摘要。", 0, right.bounds().size.height - 292, right.bounds().size.width, 22, size=12, color=C_DIM)
+        self.wechat_hint = _label("快速初稿本地处理；OCR增强默认仅在本机生成文字索引，只有勾选云端整理才发送文字摘要。", 0, right.bounds().size.height - 268, right.bounds().size.width, 22, size=12, color=C_DIM)
         _resize(self.wechat_hint, FILL_WIDTH | PIN_TOP)
         right.addSubview_(self.wechat_hint)
 
-        self.wechat_task_text = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, right.bounds().size.width, right.bounds().size.height - 320))
+        self.wechat_task_text = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, right.bounds().size.width, right.bounds().size.height - 288))
         self.wechat_task_text.setEditable_(False)
         self.wechat_task_text.setFont_(_font(12))
-        scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, right.bounds().size.width, right.bounds().size.height - 320))
+        scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, right.bounds().size.width, right.bounds().size.height - 288))
         _resize(scroll, FILL_WIDTH | FILL_HEIGHT)
         scroll.setDocumentView_(self.wechat_task_text)
         scroll.setHasVerticalScroller_(True)
